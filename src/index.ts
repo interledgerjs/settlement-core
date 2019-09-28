@@ -9,6 +9,9 @@ import { isSafeKey, SettlementStore } from './store'
 import { fromQuantity, isQuantity, isValidAmount } from './utils/quantity'
 import { retryRequest } from './utils/retry'
 import { createMemoryStore } from './store/memory'
+import { connectRedis } from './store/redis'
+
+export { createMemoryStore, connectRedis, SettlementStore }
 
 /**
  * Essential functionality to send and receive payments with peers

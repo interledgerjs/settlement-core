@@ -1,6 +1,6 @@
 # Settlement Core
 
-> #### Framework for creating Interledger settlement engines in TypeScript/JavaScript
+> #### Framework for creating Interledger settlement engines in JS
 
 [![NPM Package](https://img.shields.io/npm/v/ilp-settlement-core.svg?style=flat-square&logo=npm)](https://npmjs.org/package/ilp-settlement-core)
 [![CircleCI](https://img.shields.io/circleci/project/github/interledgerjs/settlement-core/master.svg?style=flat-square&logo=circleci)](https://circleci.com/gh/interledgerjs/settlement-core/master)
@@ -57,6 +57,8 @@ Settlement engines may also use the same HTTP API to send and receive messages w
 - **Isomorphic**. JavaScript settlement engines should operate seamlessly across Node.js, desktop & mobile browsers, and Electron apps.
 
 ## API
+
+TODO Add installation instructions
 
 🚨 Since this tech is hot off the press, note that the APIs here are beta and subject to change!
 
