@@ -1,6 +1,6 @@
 {
   "name": "ilp-settlement-core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Framework for creating Interledger settlement engines in JS",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
