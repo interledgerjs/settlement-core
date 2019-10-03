@@ -10,6 +10,9 @@ import { fromQuantity, isQuantity, isValidAmount } from './utils/quantity'
 import { retryRequest } from './utils/retry'
 import { createMemoryStore } from './store/memory'
 import { connectRedis } from './store/redis'
+import { xrppayment } from './XRP-PaymentChannel'
+
+var exports = module.exports = {};
 
 export { createMemoryStore, connectRedis, SettlementStore }
 
@@ -32,8 +35,26 @@ export const createEngine = (opts: EngineOpts = {}): ConnectGenSettlementEngine 
   const self: Layer2SettlementEngine = {
       async handleMessage(accountId, message) {
         if (message.type && message.type === 'findAddress') {
-          
+          // Bob returns his public key to Alice
+          const msg = {
+            type: "returnPublicKey",
+            address: "rf1BiGeXwwQoi8Z2ueFYTEXSwuJYfV2Jpn"
+          }
+          sendMessage(accountId, msg) 
+
+        } else if (message.type && message.type === "returnPublicKey") {
+          // Create and funding tx
+          const recipient = message.address
+
+          exports.open = (owner, recipient, value, delay, fee, callback, error)
+
+          const msg = {
+            type: "fundAndCreateChannel",
+            tx: 
+          }
+
         } else if (message.type && message.type === "fundAndCreateChannel") {
+          // monitor blockchain for funding tx
 
         } else if (message.type && message.type === "sendClaim") {
 
