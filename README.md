@@ -43,9 +43,9 @@ Settlement systems transfer value from one participant to another, and include:
 
 _Settlement engines_ are services that integrate with a settlement system to send and receive settlements. Two Interledger peers each operate compatible settlement engines. Since an Interledger connector may have many peers using the same asset, one settlement engine may manage multiple accounts, to settle with many different peers.
 
-The [Settlement Engine specification](TODO-link-to-rfc) defines a standardized HTTP API for Interledger connectors to interface with their settlement engines, and vice versa. Connectors trigger the settlement engine to perform settlements, and settlement engines trigger the connector to adjust accounting balances when incoming settlements are received, like so:
+The [Settlement Engine specification](https://github.com/interledger/rfcs/blob/a8a0426ccd15a39b6badf4e49e80997d3aaca270/0000-settlement-engines/0000-settlement-engines.md) defines a standardized HTTP API for Interledger connectors to interface with their settlement engines, and vice versa. Connectors trigger the settlement engine to perform settlements, and settlement engines trigger the connector to adjust accounting balances when incoming settlements are received, like so:
 
-(TODO insert diagram from spec)
+![Settlement architecture](./settlement-architecture.svg)
 
 Settlement engines may also use the same HTTP API to send and receive messages with a peer's settlement engine. Settlement Core manages all this communication with the connector in the background, exposing a simple interface.
 
@@ -58,11 +58,11 @@ Settlement engines may also use the same HTTP API to send and receive messages w
 
 ## API
 
-TODO Add installation instructions
-
 🚨 Since this tech is hot off the press, note that the APIs here are beta and subject to change!
 
-Settlement engines can be defined as a factory function: given account services, the function returns a Promise with a constructed settlement engine:
+First, create a new Node.js module and add the `ilp-settlement-core` NPM module as a dependency.
+
+Next, create an `index.js` (or `index.ts`, if using TypeScript) file to define the settlement engine. Settlement engines can be defined as a factory function: given account services, the function returns a Promise with a constructed settlement engine:
 
 ```js
 export const connectEngine = async services => {
@@ -172,7 +172,7 @@ async function run() {
 run().catch(err => console.error(err))
 ```
 
-The `startServer` function should also be provided a database (Settlement Core currently supports Redis and a simple in-memory store) and configuration options to connect to the connector. It returns a Promise exposing hooks to shutdown the settlement engine server.
+The `startServer` function should also be provided a database (Settlement Core currently supports Redis and a simple in-memory store) and configuration options to connect to the connector. Here's the type signature of the `startServer` function:
 
 ```typescript
 type StartServer = (
