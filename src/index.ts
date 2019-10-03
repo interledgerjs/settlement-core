@@ -13,6 +13,45 @@ import { connectRedis } from './store/redis'
 
 export { createMemoryStore, connectRedis, SettlementStore }
 
+export interface EngineOpts {
+
+}
+
+export interface Layer2SettlementEngine extends SettlementEngine {
+  handleMessage(accountId: string, message: any): Promise<any>
+  handleTransaction(tx: any): void
+  disconnect(): Promise<void>
+}
+
+export type ConnectGenSettlementEngine = (services: AccountServices) => Promise<Layer2SettlementEngine>
+
+export const createEngine = (opts: EngineOpts = {}): ConnectGenSettlementEngine => async ({
+    sendMessage,
+    creditSettlement
+}) => {
+  const self: Layer2SettlementEngine = {
+      async handleMessage(accountId, message) {
+        if (message.type && message.type === 'findAddress') {
+          
+        } else if (message.type && message.type === "fundAndCreateChannel") {
+
+        } else if (message.type && message.type === "sendClaim") {
+
+        } else if (message.type && message.type === "close") {
+
+        }
+
+      },
+      async settle(accountId, queuedAmount) {
+        const amount = queuedAmount.decimalPlaces(6, BigNumber.ROUND_DOWN)
+        log(`Starting settlement: account=${accountId} amount=${amount}`)
+        
+        const findAddress = await sendMessage(accountId, {
+          type: ''
+        })
+      }
+  }
+}
 /**
  * Essential functionality to send and receive payments with peers
  * that every settlement engine must provide
@@ -23,7 +62,9 @@ export interface SettlementEngine {
    * - For example, send a message to the peer to exchange ledger identifiers
    *
    * @param accountId Unique account identifier
+   * 
    */
+
   setupAccount?(accountId: string): Promise<void>
 
   /**
@@ -48,7 +89,8 @@ export interface SettlementEngine {
    * @param message Parsed JSON message from peer
    * @return Response message, to be serialized as JSON
    */
-  handleMessage?(accountId: string, message: any): Promise<any>
+
+  handleMessage?(accountId: string, message: any) : Promise<void>
 
   /**
    * Delete or close the given account
@@ -79,6 +121,11 @@ export interface AccountServices {
 
   /**
    * Send a notification to the connector to credit the given incoming settlement
+   * 
+   * Make sure to handle 3 cases
+   *  1. Layer 1 ledger
+   *  2. Send payment channel information
+   *  3. Send final certification
    *
    * @param accountId Unique account identifier (recipient of settlement)
    * @param amount Amount received as an incoming settlement
