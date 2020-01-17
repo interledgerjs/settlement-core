@@ -5,13 +5,8 @@ import debug from 'debug'
 import express from 'express'
 import uuid from 'uuid/v4'
 import { createController } from './controllers'
-import { isSafeKey, SettlementStore } from './store'
+import { isSafeKey, SettlementStore } from './redis'
 import { fromQuantity, isQuantity, isValidAmount } from './utils/quantity'
-import { retryRequest } from './utils/retry'
-import { createMemoryStore } from './store/memory'
-import { connectRedis } from './store/redis'
-
-export { createMemoryStore, connectRedis, SettlementStore }
 
 /**
  * Essential functionality to send and receive payments with peers
@@ -84,7 +79,11 @@ export interface AccountServices {
    * @param amount Amount received as an incoming settlement
    * @param settlementId Unique dentifier for this settlement derived from a cryptographically secure source of randomness
    */
-  creditSettlement(accountId: string, amount: BigNumber, settlementId?: string): void
+  creditSettlement(
+    accountId: string,
+    amount: BigNumber,
+    settlementId?: string
+  ): void
 
   /**
    * Retry failed or queued outgoing settlements
@@ -96,7 +95,9 @@ export interface AccountServices {
 }
 
 /** Connect and instantiate the settlement engine */
-export type ConnectSettlementEngine = (services: AccountServices) => Promise<SettlementEngine>
+export type ConnectSettlementEngine = (
+  services: AccountServices
+) => Promise<SettlementEngine>
 
 const log = debug('settlement-core')
 
@@ -128,12 +129,16 @@ export const startServer = async (
   const services: AccountServices = {
     sendMessage: async (accountId, message) => {
       if (!isSafeKey(accountId)) {
-        throw new Error(`Failed to send message: Invalid account: account=${accountId}`)
+        throw new Error(
+          `Failed to send message: Invalid account: account=${accountId}`
+        )
       }
 
       const accountExists = await store.isExistingAccount(accountId)
       if (!accountExists) {
-        throw new Error(`Failed to send message: Account doesn't exist: account=${accountId}`)
+        throw new Error(
+          `Failed to send message: Account doesn't exist: account=${accountId}`
+        )
       }
 
       const url = `${sendMessageUrl}/accounts/${accountId}/messages`
@@ -155,16 +160,22 @@ export const startServer = async (
       }
 
       if (!isValidAmount(amount)) {
-        return log(`Error: Failed to credit settlement, invalid amount: ${details}`)
+        return log(
+          `Error: Failed to credit settlement, invalid amount: ${details}`
+        )
       }
 
       if (!isSafeKey(accountId)) {
-        return log(`Error: Failed to credit settlement, invalid account: ${details}`)
+        return log(
+          `Error: Failed to credit settlement, invalid account: ${details}`
+        )
       }
 
       const accountExists = await store.isExistingAccount(accountId)
       if (!accountExists) {
-        return log(`Error: Failed to credit settlement, account doesn't exist: ${details}`)
+        return log(
+          `Error: Failed to credit settlement, account doesn't exist: ${details}`
+        )
       }
 
       // Load all uncredited settlement amounts from Redis
@@ -172,18 +183,25 @@ export const startServer = async (
         .loadAmountToCredit(accountId)
         .then(amount => {
           if (!isValidAmount(amount)) {
-            throw new Error('Invalid uncredited amounts, database may be corrupted')
+            throw new Error(
+              'Invalid uncredited amounts, database may be corrupted'
+            )
           }
 
           return amount
         })
         .catch(err => {
-          log(`Error: Failed to load uncredited settlement amounts: account=${accountId}`, err)
+          log(
+            `Error: Failed to load uncredited settlement amounts: account=${accountId}`,
+            err
+          )
           return new BigNumber(0)
         })
 
       if (uncreditedAmounts.isGreaterThan(0)) {
-        log(`Loaded uncredited amount of ${uncreditedAmounts} to retry notifying connector`)
+        log(
+          `Loaded uncredited amount of ${uncreditedAmounts} to retry notifying connector`
+        )
       }
 
       const amountToCredit = amount.plus(uncreditedAmounts)
@@ -247,7 +265,10 @@ export const startServer = async (
       await store
         .saveAmountToCredit(accountId, leftoverAmount)
         .catch(err =>
-          log(`Error: Failed to save uncredited settlement, balances incorrect: ${details}`, err)
+          log(
+            `Error: Failed to save uncredited settlement, balances incorrect: ${details}`,
+            err
+          )
         )
     },
 
@@ -255,7 +276,9 @@ export const startServer = async (
       let details = `account=${accountId}`
 
       if (!engine) {
-        return log(`Error: Engine must be connected before triggering settlment: ${details}`)
+        return log(
+          `Error: Engine must be connected before triggering settlment: ${details}`
+        )
       }
 
       if (!isSafeKey(accountId)) {
@@ -266,13 +289,18 @@ export const startServer = async (
         .loadAmountToSettle(accountId)
         .then(queuedAmount => {
           if (!isValidAmount(queuedAmount)) {
-            throw new Error('Invalid queued settlement amounts, database may be corrupted')
+            throw new Error(
+              'Invalid queued settlement amounts, database may be corrupted'
+            )
           }
 
           return queuedAmount
         })
         .catch(err => {
-          log(`Error: Failed to load amount queued for settlement: ${details}`, err)
+          log(
+            `Error: Failed to load amount queued for settlement: ${details}`,
+            err
+          )
           return new BigNumber(0)
         })
 
@@ -280,10 +308,15 @@ export const startServer = async (
         return
       }
 
-      const amountSettled = await engine.settle(accountId, amountToSettle).catch(err => {
-        log(`Settlement failed: amountToSettle=${amountToSettle} ${details}`, err)
-        return amountToSettle // For safety, assume the full settlement was performed
-      })
+      const amountSettled = await engine
+        .settle(accountId, amountToSettle)
+        .catch(err => {
+          log(
+            `Settlement failed: amountToSettle=${amountToSettle} ${details}`,
+            err
+          )
+          return amountToSettle // For safety, assume the full settlement was performed
+        })
 
       const leftoverAmount = amountToSettle.minus(amountSettled)
       details = `leftover=${leftoverAmount} settled=${amountSettled} amountToSettle=${amountToSettle} account=${accountId}`
@@ -307,7 +340,10 @@ export const startServer = async (
       await store
         .saveAmountToSettle(accountId, leftoverAmount)
         .catch(err =>
-          log(`Error: Failed to save unsettled amount, balances incorrect: ${details}`, err)
+          log(
+            `Error: Failed to save unsettled amount, balances incorrect: ${details}`,
+            err
+          )
         )
     }
   }
@@ -330,11 +366,20 @@ export const startServer = async (
 
   app.post('/accounts', bodyParser.json(), setupAccount)
   app.delete('/accounts/:id', validateAccount, deleteAccount)
-  app.post('/accounts/:id/settlements', bodyParser.json(), validateAccount, settleAccount)
-  app.post('/accounts/:id/messages', bodyParser.raw(), validateAccount, handleMessage)
+  app.post(
+    '/accounts/:id/settlements',
+    bodyParser.json(),
+    validateAccount,
+    settleAccount
+  )
+  app.post(
+    '/accounts/:id/messages',
+    bodyParser.raw(),
+    validateAccount,
+    handleMessage
+  )
 
   // TODO Lookup all accounts with owed settlements and retry them
-  // TODO Lookup all accounts with uncredited settlements and retry them
 
   const server = app.listen(port)
   log('Started settlement engine server')
@@ -346,6 +391,8 @@ export const startServer = async (
       /**
        * TODO How should awaiting pending settlements be implemented?
        * Could be implemented within individual SEs, *but* that wouldn't work for refunding the leftovers
+       *
+       * (this only makes it more important to switch the interface to a 2 phase commit)
        */
 
       if (engine.disconnect) {

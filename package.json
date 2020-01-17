@@ -30,8 +30,8 @@
   "homepage": "https://github.com/interledgerjs/settlement-core#readme",
   "dependencies": {
     "@types/express": "^4.17.1",
-    "@types/ioredis": "^4.0.18",
-    "axios": "^0.19.0",
+    "@types/ioredis": "^4.14.3",
+    "axios": "^0.19.1",
     "bignumber.js": "^9.0.0",
     "body-parser": "^1.19.0",
     "debug": "^4.1.1",
@@ -44,13 +44,15 @@
     "@types/jest": "^24.0.18",
     "@types/uuid": "^3.4.5",
     "codecov": "^3.6.1",
-    "get-port": "^5.0.0",
+    "get-port": "^5.1.0",
     "jest": "^24.9.0",
-    "prettier": "^1.18.2",
-    "ts-jest": "^24.1.0",
+    "jest-text-transformer": "^1.0.2",
+    "prettier": "^1.19.1",
+    "testcontainers": "^2.2.0",
+    "ts-jest": "^24.3.0",
     "tslint": "^5.20.0",
     "tslint-config-prettier": "^1.18.0",
     "tslint-config-standard": "^8.0.1",
-    "typescript": "^3.6.3"
+    "typescript": "^3.7.4"
   }
 }

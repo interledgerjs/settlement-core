@@ -1,7 +1,7 @@
 import debug from 'debug'
 import { RequestHandler, Dictionary } from 'express-serve-static-core'
 import { AccountServices, SettlementEngine } from '.'
-import { isSafeKey, SafeKey, SettlementStore } from './store'
+import { isSafeKey, SafeKey, SettlementStore } from './redis'
 import { fromQuantity, isQuantity } from './utils/quantity'
 import uuid from 'uuid/v4'
 import BigNumber from 'bignumber.js'
@@ -26,7 +26,11 @@ interface SettlementController {
   deleteAccount: RequestHandler<AccountParams>
 }
 
-export const createController = ({ store, engine, services }: Context): SettlementController => ({
+export const createController = ({
+  store,
+  engine,
+  services
+}: Context): SettlementController => ({
   setupAccount: async (req, res) => {
     const accountId = req.body.id || uuid() // Create account ID if none was provided
     if (!isSafeKey(accountId)) {
@@ -63,11 +67,15 @@ export const createController = ({ store, engine, services }: Context): Settleme
   validateAccount: async (req, res, next) => {
     const accountId = req.params.id
     if (!isSafeKey(accountId)) {
-      return res.status(400).send('Account ID is missing or includes unsafe characters')
+      return res
+        .status(400)
+        .send('Account ID is missing or includes unsafe characters')
     }
 
     const accountExists = await store.isExistingAccount(accountId)
-    return !accountExists ? res.status(404).send(`Account doesn't exist`) : next()
+    return !accountExists
+      ? res.status(404).send(`Account doesn't exist`)
+      : next()
   },
 
   settleAccount: async (req, res) => {
@@ -76,8 +84,12 @@ export const createController = ({ store, engine, services }: Context): Settleme
 
     const idempotencyKey = req.get('Idempotency-Key')
     if (!isSafeKey(idempotencyKey)) {
-      log(`Request to settle failed: idempotency key missing or unsafe: ${details}`)
-      return res.status(400).send('Idempotency key missing or includes unsafe characters')
+      log(
+        `Request to settle failed: idempotency key missing or unsafe: ${details}`
+      )
+      return res
+        .status(400)
+        .send('Idempotency key missing or includes unsafe characters')
     }
 
     details += ` idempotencyKey=${idempotencyKey}`
@@ -98,7 +110,11 @@ export const createController = ({ store, engine, services }: Context): Settleme
 
     let amountQueued: BigNumber
     try {
-      amountQueued = await store.queueSettlement(accountId, idempotencyKey, amountToQueue)
+      amountQueued = await store.queueSettlement(
+        accountId,
+        idempotencyKey,
+        amountToQueue
+      )
     } catch (err) {
       log(`Error: Failed to queue settlement: ${details}`, err)
       return res.sendStatus(500)
@@ -110,12 +126,14 @@ export const createController = ({ store, engine, services }: Context): Settleme
       log(
         `Request to settle failed: client reused idempotency key: ${details} previousAmount=${amountQueued}`
       )
-      return res.status(400).send('Idempotency key was reused with a different amount')
+      return res
+        .status(400)
+        .send('Idempotency key was reused with a different amount')
     }
 
     // Instead of refunding amounts too precise, track those amounts locally, and always
     // respond that the full amount was queued for settlement
-    res.status(201).send(requestQuantity)
+    res.status(201).send(requestQuantity) // TODO What if the request included extraneous properties? Should those not be sent?
 
     // Attempt to perform a settlement
     services.trySettlement(accountId)
@@ -125,12 +143,19 @@ export const createController = ({ store, engine, services }: Context): Settleme
     const accountId = req.params.id
 
     if (!engine.handleMessage) {
-      log(`Received incoming message that settlement engine cannot handle: account=${accountId}`)
-      return res.status(400).send('Settlement engine does not support incoming messages')
+      log(
+        `Received incoming message that settlement engine cannot handle: account=${accountId}`
+      )
+      return res
+        .status(400)
+        .send('Settlement engine does not support incoming messages')
     }
 
     try {
-      const response = await engine.handleMessage(accountId, JSON.parse(req.body))
+      const response = await engine.handleMessage(
+        accountId,
+        JSON.parse(req.body)
+      )
       const rawResponse = Buffer.from(JSON.stringify(response))
       res.status(201).send(rawResponse)
     } catch (err) {

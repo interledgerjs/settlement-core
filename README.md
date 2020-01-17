@@ -12,11 +12,11 @@
 
 If you're looking to operate a settlement engine with your connector or integrate one into your app or service, check out these awesome implementations!
 
-| Settlement Engine                                                  | Supported Assets | Status              | Language   | Authors                                                                                            |
-| ------------------------------------------------------------------ | ---------------- | ------------------- | ---------- | -------------------------------------------------------------------------------------------------- |
-| [Ethereum (on-ledger)](https://github.com/interledger-rs/interledger-rs/tree/master/examples/eth-settlement)                                           | ETH, ERC-20s     | _Beta_              | Rust       | [Georgios Konstantopoulos](https://github.com/gakonst/)                                            |
-| [XRP (on-ledger)](https://github.com/interledgerjs/settlement-xrp) | XRP              | _Beta_              | TypeScript | [Matt de Haast](https://github.com/matdehaast/), [Kincaid O'Neil](https://github.com/kincaidoneil) |
-| [Lightning](http://github.com/interledgerjs/settlement-lightning)  | BTC              | _Under development_ | TypeScript | [Kincaid O'Neil](https://github.com/kincaidoneil)                                                  |
+| Settlement Engine                                                 | Supported Assets | Layer            | Status           | Language   | Authors                                                                                            |
+| ----------------------------------------------------------------- | ---------------- | ---------------- | ---------------- | ---------- | -------------------------------------------------------------------------------------------------- |
+| [Ethereum](https://github.com/interledger-rs/settlement-engines)  | ETH, ERC-20s     | Ledger Transfers | _Beta_           | Rust       | [Georgios Konstantopoulos](https://github.com/gakonst/)                                            |
+| [XRP](https://github.com/interledgerjs/settlement-xrp)            | XRP              | Ledger Transfers | _Beta_           | TypeScript | [Matt de Haast](https://github.com/matdehaast/), [Kincaid O'Neil](https://github.com/kincaidoneil) |
+| [Lightning](http://github.com/interledgerjs/settlement-lightning) | BTC              | Payment Channels | _In development_ | TypeScript | [Kincaid O'Neil](https://github.com/kincaidoneil)                                                  |
 
 If you want learn more about settlement engines or develop a new one, keep reading!
 
@@ -194,7 +194,6 @@ type StartServer = (
   /** Stop the server interacting with the connector and disconnect the settlement engine */
   shutdown(): Promise<void>
 }>
-
 ```
 
 ### Configuration
