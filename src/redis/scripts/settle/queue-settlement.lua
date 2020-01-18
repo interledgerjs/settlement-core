@@ -20,5 +20,4 @@ end
 -- Reset expiration to purge this idempotency key 1 day after the most recent request
 redis.call('EXPIRE', settlement_request_key, DAY_IN_SECONDS)
 
--- Return amount queued for settlement (from preexisting idempotency key or this transaction)
 return amount

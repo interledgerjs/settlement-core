@@ -1,6 +1,8 @@
 import { DecoratedRedis } from './scripts/create-client'
-import { sleep } from '../utils/retry'
+import { sleep } from '../utils'
 import BigNumber from 'bignumber.js'
+
+const REDIS_CREDIT_POLL_INTERVAL_MS = 50
 
 export type CreditSettlement = (
   accountId: string,
@@ -21,51 +23,42 @@ export const creditSettlement = (
       // TODO Log notification failed
     })
 
+export type StopCreditLoop = () => Promise<void>
+
 /**
  * Start polling Redis for queued settlement credits to notify the connector
- *
  * @param redis Connected ioredis client decorated with custom Lua scripts
  * @param notifyConnector Callback to send HTTP request to connector to notify accounting system of incoming settlement
- * @return Callback to stop polling
+ * @return Callback to stop polling, returning a Promise that resolves when the loop ends
  */
 export const startCreditLoop = (
   redis: DecoratedRedis,
   notifyConnector: CreditSettlement
-): Function => {
+): StopCreditLoop => {
   let terminate = false
-  let creditLoop = Promise.resolve()
 
-  // TODO More idiomatic if this was replaced with a while loop?
+  const creditLoop = (async () => {
+    while (true) {
+      if (terminate) {
+        return
+      }
 
-  const pollForCredits = () => {
-    creditLoop = creditLoop
-      .then(async () => {
-        if (terminate) {
-          return
-        }
-
-        const credit = await redis.retrySettlementCredit()
-        if (!credit) {
-          await sleep(50) // Check Redis again in another 50ms
-          return pollForCredits()
-        }
-
-        const [accountId, idempotencyKey] = credit
-        const amount = new BigNumber(credit[2])
-
-        creditSettlement(redis, notifyConnector)(
-          accountId,
-          idempotencyKey,
-          amount
-        )
-
-        // Keep sending notifications until the queue is empty
-        pollForCredits()
+      const credit = await redis.retrySettlementCredit().catch(err => {
+        // TODO Catch errors so the loop doesn't automatically exist
       })
-      .catch(err => {
-        // TODO Log errors so the whole Promise chain isn't fucked
-      })
-  }
+      if (!credit) {
+        await sleep(REDIS_CREDIT_POLL_INTERVAL_MS)
+        continue
+      }
+
+      const [accountId, idempotencyKey] = credit
+      const amount = new BigNumber(credit[2])
+
+      creditSettlement(redis, notifyConnector)(accountId, idempotencyKey, amount)
+
+      // Keep sending notifications with no delay until the queue is empty
+    }
+  })()
 
   return () => {
     terminate = true

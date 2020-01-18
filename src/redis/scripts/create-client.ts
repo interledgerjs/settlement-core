@@ -1,11 +1,6 @@
 import BigNumber from 'bignumber.js'
-import Redis, {
-  MultiOptions,
-  Pipeline,
-  Redis as IoRedis,
-  RedisOptions
-} from 'ioredis'
-import { Brand } from '../../utils/quantity'
+import Redis, { MultiOptions, Pipeline, Redis as IoRedis, RedisOptions } from 'ioredis'
+import { Brand } from '../../connector/quantity'
 import DeleteAccountScript from './account/delete-account.lua'
 import AddCreditScript from './credit/add-credit.lua'
 import FinalizeCreditScript from './credit/finalize-credit.lua'
@@ -50,27 +45,16 @@ import QueueSettlementScript from './settle/queue-settlement.lua'
 
 export interface DecoratedPipeline extends Pipeline {
   commitSettlement(accountId: string, ...amountIds: string[]): DecoratedPipeline
-  addSettlementCredit(
-    accountId: string,
-    idempotencyKey: string,
-    amount: string
-  ): DecoratedPipeline
+  addSettlementCredit(accountId: string, idempotencyKey: string, amount: string): DecoratedPipeline
 }
 
 export interface DecoratedRedis extends IoRedis {
   multi(commands?: string[][], options?: MultiOptions): DecoratedPipeline
   multi(options: { pipeline: false }): Promise<string>
-  queueSettlement(
-    accountId: string,
-    idempotencyKey: string,
-    amount: string
-  ): Promise<string>
+  queueSettlement(accountId: string, idempotencyKey: string, amount: string): Promise<string>
   prepareSettlement(accountId: string, leaseDuration: number): Promise<string[]>
   retrySettlementCredit(): Promise<[string, string, string] | null>
-  finalizeSettlementCredit(
-    accountId: string,
-    idempotencyKey: string
-  ): Promise<void>
+  finalizeSettlementCredit(accountId: string, idempotencyKey: string): Promise<void>
   deleteAccount(accountId: string): Promise<void>
 }
 
@@ -80,11 +64,7 @@ export interface RedisConfig extends RedisOptions {
   uri?: string
 }
 
-export const createRedisClient = ({
-  client,
-  uri,
-  ...opts
-}: RedisConfig = {}): DecoratedRedis => {
+export const createRedisClient = ({ client, uri, ...opts }: RedisConfig = {}): DecoratedRedis => {
   /**
    * After a close reading of IORedis, options set by left params supercede
    * options set by right params (due to the use Lodash _.defaults):
@@ -138,14 +118,15 @@ export const createRedisClient = ({
   return redis as DecoratedRedis
 }
 
+// TODO Explain what a settlement amount is and the rationale for this design
 type SettlementAmount = Brand<string[], 'SettlementAmount'>
 
 export const isSettlementAmount = (o: any): o is SettlementAmount =>
   Array.isArray(o) &&
   o.length > 0 && // At least one amount
-  o.length % 2 === 0 && // Pairs of elements (amountId, amount)
+  o.length % 2 === 0 && // Pairs of elements (id, amount)
   o.every(el => typeof el === 'string') && // Every element is a string
-  o // Check "even" elements (index 1, 3, 5...) for valid amounts
+  o // Ensure valid amounts (all even elements: 1, 3, 5...)
     .filter((_, i) => i % 2 !== 0)
     .every(amount => {
       const bn = new BigNumber(amount)
