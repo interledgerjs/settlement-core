@@ -1,68 +1,53 @@
 import BigNumber from 'bignumber.js'
+import bodyParser from 'body-parser'
 import debug from 'debug'
-import { Dictionary, RequestHandler } from 'express-serve-static-core'
+import express, { Express } from 'express'
 import uuid from 'uuid/v4'
-import { isSafeKey, SafeKey, SettlementStore } from '../store'
+import { SettlementStore } from '../store'
 import { fromQuantity, isQuantity } from './quantity'
 
 const log = debug('settlement-core')
 
-interface AccountParams extends Dictionary<string> {
-  id: SafeKey
-}
+/** Create settlement engine server to handle requests from connector */
+export const createController = (store: SettlementStore): Express => {
+  const app = express()
 
-// TODO Add docs here!
-interface ConnectorRequestController {
-  setupAccount: RequestHandler
-  validateAccount: RequestHandler // TODO Should I have validateAccount just exist as a separate function called by each?
-  settleAccount: RequestHandler<AccountParams>
-  handleMessage: RequestHandler<AccountParams>
-  deleteAccount: RequestHandler<AccountParams>
-}
-
-export const createController = (store: SettlementStore): ConnectorRequestController => ({
-  async setupAccount(req, res) {
+  // Setup new accounts
+  app.post('/accounts', bodyParser.json(), async (req, res) => {
     const accountId = req.body.id || uuid() // Create account ID if none was provided
-    if (!isSafeKey(accountId)) {
-      return res.status(400).send('Account ID includes unsafe characters')
-    }
-
-    /**
-     * TODO
-     * Before creating the accout/calling setup, ensure the peer is reachable:
-     * Try pinging them and await either a response or a ping from said peer?
-     */
 
     try {
-      await store.createAccount(accountId)
+      await store.createAccount(accountId) // TODO If the account already exists, should this fail? (comment this in Redis store)
     } catch (err) {
       log(`Failed to setup account: account=${accountId}`, err)
       return res.sendStatus(500)
     }
 
-    res.status(201).send({
-      id: accountId
-    })
-  },
+    res.sendStatus(201)
+  })
 
-  async validateAccount(req, res, next) {
+  // Delete accounts
+  app.delete('/accounts/:id', async (req, res) => {
     const accountId = req.params.id
-    if (!isSafeKey(accountId)) {
-      return res.status(400).send('Account ID is missing or includes unsafe characters')
+
+    try {
+      await store.deleteAccount(accountId)
+      res.sendStatus(204)
+    } catch (err) {
+      log(`Failed to delete account: account=${accountId}`, err)
+      res.sendStatus(500)
     }
+  })
 
-    const accountExists = await store.isExistingAccount(accountId)
-    return !accountExists ? res.status(404).send(`Account doesn't exist`) : next()
-  },
-
-  async settleAccount(req, res) {
+  // Perform outgoing settlements
+  app.post('/accounts/:id/settlements', bodyParser.json(), async (req, res) => {
     const accountId = req.params.id
     let details = `account=${accountId}`
 
     const idempotencyKey = req.get('Idempotency-Key')
-    if (!isSafeKey(idempotencyKey)) {
-      log(`Request to settle failed: idempotency key missing or unsafe: ${details}`)
-      return res.status(400).send('Idempotency key missing or includes unsafe characters')
+    if (!idempotencyKey) {
+      log(`Request to settle failed: idempotency key missing: ${details}`)
+      return res.status(400).send('Idempotency key missing')
     }
 
     details += ` idempotencyKey=${idempotencyKey}`
@@ -97,9 +82,10 @@ export const createController = (store: SettlementStore): ConnectorRequestContro
     }
 
     res.sendStatus(201)
-  },
+  })
 
-  async handleMessage(req, res) {
+  // Respond to incoming messages
+  app.post('/accounts/:id/messages', bodyParser.raw(), async (req, res) => {
     const accountId = req.params.id
 
     if (!store.handleMessage) {
@@ -116,17 +102,7 @@ export const createController = (store: SettlementStore): ConnectorRequestContro
       log(`Error while handling message: account=${accountId}`, err)
       res.sendStatus(500)
     }
-  },
+  })
 
-  async deleteAccount(req, res) {
-    const accountId = req.params.id
-
-    try {
-      await store.deleteAccount(accountId)
-      res.sendStatus(204)
-    } catch (err) {
-      log(`Failed to delete account: account=${accountId}`, err)
-      res.sendStatus(500)
-    }
-  }
-})
+  return app
+}
