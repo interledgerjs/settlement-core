@@ -1,9 +1,8 @@
 import BigNumber from 'bignumber.js'
+import { Brand } from '../utils'
 
 /** Match only characters 0-9 */
 const NUMERIC_REGEX = new RegExp(/^\d+$/)
-
-export type Brand<K, T> = K & { readonly __brand: T }
 
 /** Convert a Quantity to an arbitrary precision amount in the standard unit of the asset */
 export const fromQuantity = ({ amount, scale }: Quantity): BigNumber =>
@@ -37,6 +36,4 @@ export const isQuantity = (o: any): o is Quantity =>
   new BigNumber(o.amount).isInteger() &&
   +o.amount >= 0
 
-/** Is the given BigNumber finite and non-negative (positive or 0)? */
-export const isValidAmount = (amount: BigNumber): boolean =>
-  amount.isGreaterThanOrEqualTo(0) && amount.isFinite()
+// TODO Should I include the ValidAmount nominal type here, or somewhere else?

@@ -1,40 +1,28 @@
 import BigNumber from 'bignumber.js'
-import debug from 'debug'
 import { ConnectorServices } from '../connector/services'
-import { SafeKey, SettlementStore } from '../store'
-import { AccountServices, setupSettlementServices } from './account-services'
-import { startCreditLoop } from './notify-settlement'
-import { createRedisClient, DecoratedPipeline, RedisConfig } from './scripts/create-client'
+import { SettlementStore } from '../store'
+import { RedisStoreServices, setupSettlementServices } from './services'
+import { createRedisClient, DecoratedPipeline, DecoratedRedis, RedisConfig } from './database'
+import { Brand, sleep } from '../utils'
+import debug from 'debug'
+
+export { RedisStoreServices, DecoratedPipeline, DecoratedRedis, RedisConfig }
+
+const log = debug('settlement-core')
+
+/** TODO */
+const REDIS_CREDIT_POLL_INTERVAL_MS = 50
+
+/** TODO */
+const KEY_NAMESPACE_DELIMITER = ':'
 
 // TODO Should I setup typedoc?
 
 // TODO Make sure I add docs here
 
 export type ConnectRedisSettlementEngine = (
-  services: AccountServices
+  services: RedisStoreServices
 ) => Promise<RedisSettlementEngine>
-
-// TODO
-// - How should the admin API functionality be extended/shared between a Store, Core, and the SE?
-//      One idea: what if it provided an express server or function that could be extended?
-//
-// - Should an express `app` be passed from startServer -> store -> SE?
-
-/**
- * TODO Add docs for this type
- *
- * "acquire lease"
- *
- * Put funds on hold to perform async tasks before executing a settlement.
- * Funds will be refunded & retried later if the lease expires before the settlement is committed.
- * @param leaseDuration
- * @returns Maximum amount to settle, in standard unit of the asset (arbitrary precision)
- *
- * Redis transaction which removes the settlement as pending, or fails if the lease already expired.
- * The consumer should execute this transaction directly before unconditionally performing the settlement,
- * with custom logic to rollback the settlement in case of failure. TODO
- */
-export type PrepareSettlement = (leaseDuration: number) => Promise<[BigNumber, DecoratedPipeline]>
 
 /**
  * TODO
@@ -68,16 +56,10 @@ export interface RedisSettlementEngine {
 
   /**
    * Send a settlement to the peer for up to the given amount
-   * - Since the amount is provided in arbitrary precision, round to the correct
-   *   precision first
-   * - Use `prepare` to fetch the amount to settle and commitment transaction
-   * - Execute the returned commitment transaction before unconditionally preforming the settlement
-   *   to safely rollback in case of failure
+   * - Use `prepareSettlement` callback to fetch the amount and commit the settlement
    * @param accountId Unique identifier of account to settle with
-   * @param prepare Callback to put funds on hold to begin the settlement. Returns the amount
-   *        to settle and transaction to commit before unconditionally performing the settlement.
    */
-  settle(accountId: SafeKey, prepare: PrepareSettlement): Promise<void>
+  settle(accountId: SafeKey): Promise<void>
 
   /** Disconnect the settlement engine and gracefully close ledger connections */
   disconnect?(): Promise<void>
@@ -85,22 +67,25 @@ export interface RedisSettlementEngine {
 
 export const connectRedisStore = async (
   createEngine: ConnectRedisSettlementEngine,
-  { sendMessage, sendCreditNotification }: ConnectorServices,
+  connectorServices: ConnectorServices,
   redisConfig: RedisConfig
 ): Promise<SettlementStore> => {
-  const redis = createRedisClient(redisConfig)
+  const redis = await createRedisClient(redisConfig)
 
-  const log = debug('settlement-core:redis')
+  const { sendMessage, sendCreditRequest } = connectorServices
+
+  // Callback to send a request to connector to credit a settlement and if successful, finalize in Redis
+  const notifyAndFinalizeCredit = tryToFinalizeCredit(redis)(sendCreditRequest)
 
   // Setup account services: callbacks to send messages, credit settlements, etc. to pass to the settlement engine
-  const accountServices: AccountServices = {
+  const accountServices: RedisStoreServices = {
     redis,
     sendMessage,
-    ...setupSettlementServices(redis, sendCreditNotification)
+    ...setupSettlementServices(redis, notifyAndFinalizeCredit)
   }
 
   // Create background task to poll Redis for when to retry notifying the connector of incoming settlements
-  const stopCreditLoop = startCreditLoop(redis, sendCreditNotification)
+  const stopCreditLoop = startCreditLoop(redis, notifyAndFinalizeCredit)
 
   // Connect the settlement engine
   const engine = await createEngine(accountServices)
@@ -108,16 +93,36 @@ export const connectRedisStore = async (
   // TODO Try to settle with all accounts for queued settlements
 
   return {
+    ...engine.handleMessage?.bind(engine),
+
     async createAccount(accountId) {
+      // TODO Check for safe key
       return (await redis.sadd('accounts', accountId)) === 0 // SADD returns number of elements added to set
     },
+
     async isExistingAccount(accountId) {
+      // TODO CHeck for safe key
       return (await redis.sismember('accounts', accountId)) === 1
     },
+
     async deleteAccount(accountId) {
+      // TODO Check for safe key
       await redis.deleteAccount(accountId)
     },
+
     async handleSettlementRequest(accountId, idempotencyKey, amount) {
+      if (!isSafeKey(accountId)) {
+        return Promise.reject(new Error('Account ID contains unsafe characters'))
+      }
+
+      if (!isSafeKey(idempotencyKey)) {
+        return Promise.reject(new Error('Idempotency key contains unsafe characters'))
+      }
+
+      if (!isValidAmount) {
+        // TODO Implement this!
+      }
+
       // TODO Perform validation on accountId? Amount? Or should error handling be in server code?
 
       const amountQueued = await redis.queueSettlement(accountId, idempotencyKey, amount.toFixed())
@@ -125,13 +130,97 @@ export const connectRedisStore = async (
       // TODO Add logs here
 
       // Attempt to perform a settlement
-      accountServices.trySettlement(accountId, engine.settle) // TODO Will passing engine.settle as function cause issues? Should I use an internal callback?
+      engine.settle(accountId)
 
       return new BigNumber(amountQueued)
     },
+
     async disconnect() {
       await stopCreditLoop()
       redis.disconnect()
     }
+  }
+}
+
+/** TODO doc */
+export type SafeKey = Brand<string, 'SafeKey'>
+
+/** TODO doc */
+export const isSafeKey = (o: any): o is SafeKey =>
+  typeof o === 'string' && o.length > 0 && !o.includes(KEY_NAMESPACE_DELIMITER)
+
+/** TODO doc */
+export type ValidAmount = Brand<BigNumber, 'ValidAmount'>
+
+/** Is the given amount a valid BigNumber, finite, and non-negative (positive or 0)? */
+export const isValidAmount = (o: any): o is ValidAmount =>
+  BigNumber.isBigNumber(o) && o.isGreaterThanOrEqualTo(0) && o.isFinite()
+
+/** Credit an incoming settlement to the account's balance */
+export type CreditSettlement = (
+  accountId: SafeKey,
+  idempotencyKey: SafeKey,
+  amount: ValidAmount
+) => Promise<void>
+
+// prettier-ignore
+
+/**
+ * Create callback to send a request to the connector to credit an incoming settlement
+ * and finalize the credited settlement in Redis if successful.
+ */
+export const tryToFinalizeCredit =
+    (redis: DecoratedRedis) =>
+    (sendCreditRequest: CreditSettlement): CreditSettlement =>
+    (accountId, idempotencyKey, amount) =>
+      sendCreditRequest(accountId, idempotencyKey, amount)
+        .then(async () => {
+          await redis.finalizeSettlementCredit(accountId, idempotencyKey)
+          log(`Connector credited settlement: account=${accountId} amount=${amount}, idempotencyKey=${idempotencyKey}`)
+        })
+        .catch(err => // TODO Include the error here!
+          log(`Connector failed to credit settlement, will retry: account=${accountId} amount=${amount}, idempotencyKey=${idempotencyKey}`)
+        )
+
+type StopCreditLoop = () => Promise<void>
+
+/**
+ * Start polling Redis for queued settlement credits to notify the connector
+ * @param redis Connected ioredis client decorated with custom Lua scripts
+ * @param notifyConnector Callback to send HTTP request to connector to notify accounting system of incoming settlement
+ * @return Callback to stop polling, returning a Promise that resolves when the loop ends
+ */
+export const startCreditLoop = (
+  redis: DecoratedRedis,
+  sendCreditRequest: CreditSettlement
+): StopCreditLoop => {
+  let terminate = false
+
+  const creditLoop = (async () => {
+    while (true) {
+      if (terminate) {
+        return
+      }
+
+      // TODO Log error, but throttle so the logs don't fill up
+      const credit = await redis.retrySettlementCredit().catch(() => null)
+      if (!credit) {
+        await sleep(REDIS_CREDIT_POLL_INTERVAL_MS)
+        continue
+      }
+
+      const [accountId, idempotencyKey] = credit
+      const amount = new BigNumber(credit[2])
+
+      // TODO Validate accountId is SafeKey -- or update schema to say it MUST return a SafeKey?
+      sendCreditRequest(accountId, idempotencyKey, amount)
+
+      // Keep sending notifications with no delay until the queue is empty
+    }
+  })()
+
+  return () => {
+    terminate = true
+    return creditLoop
   }
 }

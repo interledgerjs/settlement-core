@@ -7,11 +7,7 @@ const log = debug('settlement-core')
 
 export interface ConnectorServices {
   // TODO resolves if acked, rejects if not
-  sendCreditNotification(
-    accountId: string,
-    idempotencyKey: string,
-    amount: BigNumber
-  ): Promise<void>
+  sendCreditRequest(accountId: string, idempotencyKey: string, amount: BigNumber): Promise<void>
   sendMessage(accountId: string, message: any): Promise<any>
 }
 
@@ -24,7 +20,7 @@ interface ConnectorConfig {
 }
 
 export const createConnectorServices = (config: ConnectorConfig): ConnectorServices => ({
-  async sendCreditNotification(accountId, idempotencyKey, amount) {
+  async sendCreditRequest(accountId, idempotencyKey, amount) {
     let details = `amountToCredit=${amount} account=${accountId} idempotencyKey=${idempotencyKey}`
 
     // TODO Should this logic even be here? Can I do anything about it? It should never get added to the DB in the first place
@@ -33,6 +29,7 @@ export const createConnectorServices = (config: ConnectorConfig): ConnectorServi
       return
     }
 
+    // TODO Validate the resulting quantity instead of the amount? idk
     if (!isValidAmount(amount)) {
       return log(`Error: Failed to credit settlement, invalid amount: ${details}`)
     }

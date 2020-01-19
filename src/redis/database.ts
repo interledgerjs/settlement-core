@@ -1,13 +1,16 @@
 import BigNumber from 'bignumber.js'
 import Redis, { MultiOptions, Pipeline, Redis as IoRedis, RedisOptions } from 'ioredis'
-import { Brand } from '../../connector/quantity'
-import DeleteAccountScript from './account/delete-account.lua'
-import AddCreditScript from './credit/add-credit.lua'
-import FinalizeCreditScript from './credit/finalize-credit.lua'
-import RetryCreditScript from './credit/retry-credit.lua'
-import CommitSettlementScript from './settle/commit-settlement.lua'
-import PrepareSettlementScript from './settle/prepare-settlement.lua'
-import QueueSettlementScript from './settle/queue-settlement.lua'
+import { SafeKey } from '.'
+import { Brand } from '../utils'
+import DeleteAccountScript from './scripts/account/delete-account.lua'
+import AddCreditScript from './scripts/credit/add-credit.lua'
+import FinalizeCreditScript from './scripts/credit/finalize-credit.lua'
+import RetryCreditScript from './scripts/credit/retry-credit.lua'
+import CommitSettlementScript from './scripts/settle/commit-settlement.lua'
+import PrepareSettlementScript from './scripts/settle/prepare-settlement.lua'
+import QueueSettlementScript from './scripts/settle/queue-settlement.lua'
+
+// TODO Rename this file to... database ?
 
 /**
  * Redis Key Namespace
@@ -20,22 +23,23 @@ import QueueSettlementScript from './settle/queue-settlement.lua'
  * - Hash of each request from connector to send an outgoing settlement, set to expire 24 hours after the most recent request.
  *   `amount` -- Arbitrary precision string of amount queued for settlement
  *
- * TODO Should I rename this slightly? e.g. "settlement-debits" or "settlement-amounts" ?
  * accounts:[account-id]:pending-settlements
- * - Sorted set of pending settlement IDs, sorted by the UNIX timestamp of the lease expiration in milliseconds.
- *   A total settlement may be the sum of several of these settlement amounts.
- *   When a settlement begins, a lease is created so the funds cannot be double spent until it expires or is committed.
+ * - Sorted set of pending settlement amount IDs, sorted by the UNIX timestamp of the lease expiration in milliseconds.
+ * - Since Redis does not support arbitrary precision arithmetic/manipulation, a single settlement may be comprised
+ *   of multiple settlement amounts, each with a unique ID, tracked by the client.
+ * - When a settlement begins, a lease is created on one or multiple of these settlement amounts
+ *   so the funds cannot be double spent until the lease expires or the settlement is committed.
  *
- * accounts:[account-id]:pending-settlements:[settlement-id]
- * - Arbitrary precision string of the amount corresponding to the settlement ID
+ * accounts:[account-id]:pending-settlements:[amount-id]
+ * - Arbitrary precision string of the settlement amount corresponding to the amount ID
  *
  * accounts:[account-id]:settlement-credits:[idempotency-key]
  * - Hash of each request to connector to credit an incoming settlement
  *   `amount`               -- Arbitrary precision string of amount to credit as an incoming settlement
  *   `next_retry_timestamp` -- UNIX timestamp in milliseconds after which the next request may be attempted
  *   `num_attempts`         -- Number of requests to the connector attempted to credit the settlement
- *   `idempotency_key`      -- Unique string for Idempotency-Key header, typically a UUID or settlement ID
- *   `account_id`           -- Account identifier the settlement should be credited to
+ *   `idempotency_key`      -- Unique string for Idempotency-Key header, typically a UUID
+ *   `account_id`           -- Account the settlement should be credited to
  *
  * pending-settlement-credits
  * - Sorted set of keys for corresponding credit hashes, sorted by UNIX timestamp of the next retry in milliseconds
@@ -43,19 +47,25 @@ import QueueSettlementScript from './settle/queue-settlement.lua'
 
 // TODO Add docs to all of this!
 
+// TODO Add stronger type checking to all of this
+
 export interface DecoratedPipeline extends Pipeline {
-  commitSettlement(accountId: string, ...amountIds: string[]): DecoratedPipeline
-  addSettlementCredit(accountId: string, idempotencyKey: string, amount: string): DecoratedPipeline
+  commitSettlement(accountId: SafeKey, ...amountIds: string[]): DecoratedPipeline
+  addSettlementCredit(
+    accountId: SafeKey,
+    idempotencyKey: SafeKey,
+    amount: string
+  ): DecoratedPipeline
 }
 
 export interface DecoratedRedis extends IoRedis {
   multi(commands?: string[][], options?: MultiOptions): DecoratedPipeline
   multi(options: { pipeline: false }): Promise<string>
-  queueSettlement(accountId: string, idempotencyKey: string, amount: string): Promise<string>
-  prepareSettlement(accountId: string, leaseDuration: number): Promise<string[]>
+  queueSettlement(accountId: SafeKey, idempotencyKey: SafeKey, amount: string): Promise<string>
+  prepareSettlement(accountId: SafeKey, leaseDuration: number): Promise<string[]>
   retrySettlementCredit(): Promise<[string, string, string] | null>
-  finalizeSettlementCredit(accountId: string, idempotencyKey: string): Promise<void>
-  deleteAccount(accountId: string): Promise<void>
+  finalizeSettlementCredit(accountId: SafeKey, idempotencyKey: SafeKey): Promise<void>
+  deleteAccount(accountId: SafeKey): Promise<void>
 }
 
 /** Configuration options for the connection to the Redis database */
@@ -64,13 +74,17 @@ export interface RedisConfig extends RedisOptions {
   uri?: string
 }
 
-export const createRedisClient = ({ client, uri, ...opts }: RedisConfig = {}): DecoratedRedis => {
+export const createRedisClient = async (config: RedisConfig = {}): Promise<DecoratedRedis> => {
+  const { client, uri, ...opts } = config
+
   /**
    * After a close reading of IORedis, options set by left params supercede
    * options set by right params (due to the use Lodash _.defaults):
    * https://github.com/luin/ioredis/blob/1baff479b2abfb1cba73e84ce514b3330b2b0993/lib/redis/index.ts#L193
    */
   const redis = client || new Redis(uri, opts)
+
+  await redis.connect()
 
   // Register scripts for account management
 
@@ -112,8 +126,6 @@ export const createRedisClient = ({ client, uri, ...opts }: RedisConfig = {}): D
     numberOfKeys: 0,
     lua: FinalizeCreditScript
   })
-
-  // TODO Return Promise and wait for Redis to connect?
 
   return redis as DecoratedRedis
 }

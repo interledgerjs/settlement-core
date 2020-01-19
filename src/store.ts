@@ -1,40 +1,27 @@
 import BigNumber from 'bignumber.js'
-import { Brand } from './connector/quantity'
 import { ConnectorServices } from './connector/services'
-
-// TODO Should SafeKey be moved to utils?
-
-const KEY_NAMESPACE_DELIMITER = ':'
-
-export type SafeKey = Brand<string, 'SafeKey'>
-
-export const isSafeKey = (o: any): o is SafeKey =>
-  typeof o === 'string' && !o.includes(KEY_NAMESPACE_DELIMITER)
 
 export type CreateStore = (services: ConnectorServices) => Promise<SettlementStore>
 
 export interface SettlementStore {
   /**
    * Create an account with the given ID
-   *
    * @param accountId Unique account identifier
    * @return Did the account already exist?
    */
-  createAccount(accountId: SafeKey): Promise<boolean>
+  createAccount(accountId: string): Promise<boolean>
 
   /**
    * Has the given account been instantiated via a call from the connector?
-   *
    * @param accountId Unique account identifier
    */
-  isExistingAccount(accountId: SafeKey): Promise<boolean>
+  isExistingAccount(accountId: string): Promise<boolean>
 
   /**
    * Delete all state associated with the given account
-   *
    * @param accountId Unique account identifier
    */
-  deleteAccount(accountId: SafeKey): Promise<void>
+  deleteAccount(accountId: string): Promise<void>
 
   /**
    * Save the amount to settle corresponding to the given idempotency key
@@ -48,8 +35,8 @@ export interface SettlementStore {
    * @return Amount queued for settlement corresponding to this idempotency key
    */
   handleSettlementRequest(
-    accountId: SafeKey,
-    idempotencyKey: SafeKey,
+    accountId: string,
+    idempotencyKey: string,
     amount: BigNumber
   ): Promise<BigNumber>
 

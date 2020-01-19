@@ -2,24 +2,21 @@ import BigNumber from 'bignumber.js'
 import Redis from 'ioredis'
 import { GenericContainer, StartedTestContainer } from 'testcontainers'
 import uuid from 'uuid/v4'
-import { connectRedis, RedisSettlementStore } from './redis'
+import { connectRedisStore } from './'
+import { SettlementStore } from '../store'
 
 let redisContainer: StartedTestContainer
-let store: RedisSettlementStore
+let store: SettlementStore
 let client: Redis.Redis
 
 describe('Redis store', () => {
   beforeEach(async () => {
-    redisContainer = await new GenericContainer('redis')
-      .withExposedPorts(6379)
-      .start()
+    redisContainer = await new GenericContainer('redis').withExposedPorts(6379).start()
 
-    client = new Redis(
-      redisContainer.getMappedPort(6379),
-      redisContainer.getContainerIpAddress()
-    )
+    client = new Redis(redisContainer.getMappedPort(6379), redisContainer.getContainerIpAddress())
 
-    store = await connectRedis({
+    // TODO Mock the engine?
+    store = await connectRedisStore({
       client
     })
   })
@@ -37,6 +34,7 @@ describe('Redis store', () => {
       settlementId
     }
 
+    // TODO Call "queueSettlement" instead, and use a spy to see if it calls the callback
     console.log(await store.addSettlementCredit(credit))
 
     const foo = await client.hmget(
@@ -58,7 +56,7 @@ describe('Redis store', () => {
 
     await new Promise(r => setTimeout(r, 200))
 
-    nextCredit = await store.retrySettlementCredit()
+    nextCredit = await store.retrySettlementCredit() // TODO Don't need to use/test this directly
     expect(nextCredit).toEqual(credit)
   })
 
