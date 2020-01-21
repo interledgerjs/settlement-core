@@ -93,7 +93,7 @@ export const connectRedisStore = async (
   // TODO Try to settle with all accounts for queued settlements
 
   return {
-    ...engine.handleMessage?.bind(engine),
+    ...(engine.handleMessage && engine.handleMessage.bind(engine)),
 
     async createAccount(accountId) {
       // TODO Check for safe key
@@ -106,7 +106,11 @@ export const connectRedisStore = async (
     },
 
     async deleteAccount(accountId) {
-      // TODO Check for safe key
+      // TODO Check for safe key?
+      if (!isSafeKey(accountId)) {
+        return
+      }
+
       await redis.deleteAccount(accountId)
     },
 
@@ -213,6 +217,11 @@ export const startCreditLoop = (
       const amount = new BigNumber(credit[2])
 
       // TODO Validate accountId is SafeKey -- or update schema to say it MUST return a SafeKey?
+      if (!isSafeKey(accountId) || !isSafeKey(idempotencyKey) || !isValidAmount(amount)) {
+        await sleep(REDIS_CREDIT_POLL_INTERVAL_MS)
+        continue
+      }
+
       sendCreditRequest(accountId, idempotencyKey, amount)
 
       // Keep sending notifications with no delay until the queue is empty

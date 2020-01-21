@@ -1,6 +1,6 @@
 import axios from 'axios'
 import BigNumber from 'bignumber.js'
-import { isValidAmount } from './quantity'
+import { isValidAmount } from '../redis'
 import debug from 'debug'
 
 const log = debug('settlement-core')
@@ -42,6 +42,8 @@ export const createConnectorServices = (config: ConnectorConfig): ConnectorServi
       scale,
       amount: amount.shiftedBy(scale).toFixed(0) // `toFixed` always uses normal (not exponential) notation
     }
+
+    // TODO Validate the quantity instead of the amount so I don't have an import from Redis
 
     // TODO How to handle promise rejections here?
     const { status } = await axios({

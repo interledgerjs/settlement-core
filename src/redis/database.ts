@@ -10,8 +10,6 @@ import CommitSettlementScript from './scripts/settle/commit-settlement.lua'
 import PrepareSettlementScript from './scripts/settle/prepare-settlement.lua'
 import QueueSettlementScript from './scripts/settle/queue-settlement.lua'
 
-// TODO Rename this file to... database ?
-
 /**
  * Redis Key Namespace
  * =========================================
@@ -83,8 +81,6 @@ export const createRedisClient = async (config: RedisConfig = {}): Promise<Decor
    * https://github.com/luin/ioredis/blob/1baff479b2abfb1cba73e84ce514b3330b2b0993/lib/redis/index.ts#L193
    */
   const redis = client || new Redis(uri, opts)
-
-  await redis.connect()
 
   // Register scripts for account management
 

@@ -88,7 +88,9 @@ export const setupSettlementServices = (
     const details = `account=${accountId} amount=${amount} ids=${amountIds}`
     log(`Preparing settlement, funds on hold: ${details}`)
 
-    return [amount, commitTx]
+    // TODO Perform validation to ensure it's a valid amount
+
+    return [amount as ValidAmount, commitTx]
   },
 
   async creditSettlement(accountId, amount, tx = redis.multi()) {
@@ -110,7 +112,7 @@ export const setupSettlementServices = (
     }
 
     // TODO Also atomically check that the account still exists
-    await tx.addSettlementCredit(accountId, amount.toFixed(), idempotencyKey).exec()
+    await tx.addSettlementCredit(accountId, idempotencyKey, amount.toFixed()).exec()
 
     log(`Saved incoming settlement, attempting to notify connector: ${details}`)
 
