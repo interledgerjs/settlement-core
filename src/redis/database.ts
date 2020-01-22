@@ -1,6 +1,6 @@
 import BigNumber from 'bignumber.js'
 import Redis, { MultiOptions, Pipeline, Redis as IoRedis, RedisOptions } from 'ioredis'
-import { SafeKey } from '.'
+import { SafeRedisKey, isValidAmount } from '.'
 import { Brand } from '../utils'
 import DeleteAccountScript from './scripts/account/delete-account.lua'
 import AddCreditScript from './scripts/credit/add-credit.lua'
@@ -48,10 +48,10 @@ import QueueSettlementScript from './scripts/settle/queue-settlement.lua'
 // TODO Add stronger type checking to all of this
 
 export interface DecoratedPipeline extends Pipeline {
-  commitSettlement(accountId: SafeKey, ...amountIds: string[]): DecoratedPipeline
+  commitSettlement(accountId: SafeRedisKey, ...amountIds: string[]): DecoratedPipeline
   addSettlementCredit(
-    accountId: SafeKey,
-    idempotencyKey: SafeKey,
+    accountId: SafeRedisKey,
+    idempotencyKey: SafeRedisKey,
     amount: string
   ): DecoratedPipeline
 }
@@ -59,11 +59,15 @@ export interface DecoratedPipeline extends Pipeline {
 export interface DecoratedRedis extends IoRedis {
   multi(commands?: string[][], options?: MultiOptions): DecoratedPipeline
   multi(options: { pipeline: false }): Promise<string>
-  queueSettlement(accountId: SafeKey, idempotencyKey: SafeKey, amount: string): Promise<string>
-  prepareSettlement(accountId: SafeKey, leaseDuration: number): Promise<string[]>
+  queueSettlement(
+    accountId: SafeRedisKey,
+    idempotencyKey: SafeRedisKey,
+    amount: string
+  ): Promise<[string, 1 | null]>
+  prepareSettlement(accountId: SafeRedisKey, leaseDuration: number): Promise<string[]>
   retrySettlementCredit(): Promise<[string, string, string] | null>
-  finalizeSettlementCredit(accountId: SafeKey, idempotencyKey: SafeKey): Promise<void>
-  deleteAccount(accountId: SafeKey): Promise<void>
+  finalizeSettlementCredit(accountId: SafeRedisKey, idempotencyKey: SafeRedisKey): Promise<void>
+  deleteAccount(accountId: SafeRedisKey): Promise<void>
 }
 
 /** Configuration options for the connection to the Redis database */
@@ -126,17 +130,21 @@ export const createRedisClient = async (config: RedisConfig = {}): Promise<Decor
   return redis as DecoratedRedis
 }
 
-// TODO Explain what a settlement amount is and the rationale for this design
-type SettlementAmount = Brand<string[], 'SettlementAmount'>
+/**
+ * List of amounts available to settle, each with a unique ID to get around Redis' limitations
+ * for manipulating BigNumbers. Flattened list of pairs of [amountId, amount]
+ */
+type SettlementAmounts = Brand<string[], 'SettlementAmounts'>
 
-export const isSettlementAmount = (o: any): o is SettlementAmount =>
+/** Is this a semantically valid list of amounts to settle from Redis? */
+export const isSettlementAmounts = (o: any): o is SettlementAmounts =>
   Array.isArray(o) &&
-  o.length > 0 && // At least one amount
-  o.length % 2 === 0 && // Pairs of elements (id, amount)
-  o.every(el => typeof el === 'string') && // Every element is a string
-  o // Ensure valid amounts (all even elements: 1, 3, 5...)
+  // Pairs of elements (id, amount)
+  o.length % 2 === 0 &&
+  // Every element is a string
+  o.every(el => typeof el === 'string') &&
+  // Ensure amounts are valid (all even elements: 1, 3, 5...)
+  o
     .filter((_, i) => i % 2 !== 0)
-    .every(amount => {
-      const bn = new BigNumber(amount)
-      return bn.isGreaterThanOrEqualTo(0) && bn.isFinite()
-    })
+    .map(el => new BigNumber(el))
+    .every(isValidAmount)

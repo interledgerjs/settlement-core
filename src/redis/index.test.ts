@@ -7,10 +7,14 @@ import {
   RedisSettlementEngine,
   ConnectRedisSettlementEngine,
   RedisStoreServices,
-  SafeKey
+  SafeRedisKey
 } from './'
 import { SettlementStore } from '../store'
 import { ConnectorServices } from '../connector/services'
+import debug from 'debug'
+import { sleep } from '../utils'
+
+const log = debug('settlement-core')
 
 let redisContainer: StartedTestContainer
 let client: IoRedis
@@ -26,8 +30,11 @@ describe('Redis settlement store', () => {
 
     client = new Redis(redisContainer.getMappedPort(6379), redisContainer.getContainerIpAddress())
 
+    // TODO For debugging!
+    log('Redis port', redisContainer.getMappedPort(6379))
+
     mockEngine = {
-      settle: jest.fn()
+      settle: jest.fn(async () => Promise.resolve())
     }
 
     const connectMockEngine: ConnectRedisSettlementEngine = async services => {
@@ -54,7 +61,7 @@ describe('Redis settlement store', () => {
   })
 
   describe('Queues new settlements', () => {
-    test('Ignores requests with different amounts and the same idempotency key', async () => {
+    test('Requests with same idempotency key return amount in original request', async () => {
       const accountId = uuid()
       const idempotencyKey = uuid()
       const requestAmount = new BigNumber(40001348)
@@ -74,46 +81,57 @@ describe('Redis settlement store', () => {
       expect(amountQueued2).toStrictEqual(requestAmount)
     })
 
-    test('Only queues a single TODO', async () => {
-      const accountId = 'alice' as SafeKey
+    test.only('Requests with same idempotency key queue a settlement exactly once', async () => {
+      const accountId = 'alice' as SafeRedisKey
       const idempotencyKey = uuid()
       const requestAmount = new BigNumber(3.21)
 
-      // Initially, zero should be queued for settlement
+      // (1) Initially, zero should be queued for settlement
       const [initialQueuedAmount] = await prepareSettlement(accountId, 1000)
       expect(initialQueuedAmount).toStrictEqual(new BigNumber(0))
 
-      // Create an arbitrary race condition: send 20 requests for the same settlement all at once
-      // Goal is to ensure Redis only queues the amount once
-      const amountsQueued = await Promise.all(
-        [...Array(20)].map(() =>
-          store.handleSettlementRequest(accountId, idempotencyKey, requestAmount)
-        )
+      const amountQueued1 = await store.handleSettlementRequest(
+        accountId,
+        idempotencyKey,
+        requestAmount
       )
+      expect(amountQueued1).toStrictEqual(requestAmount)
 
-      expect(amountsQueued).resolves.toStrictEqual(Array(20).fill(requestAmount))
-
-      // TODO This needs to be after the pending requests complete
+      // Settlement be triggered after the original request
+      // await sleep(10) // Allow event queue to call `settle`
       expect(mockEngine.settle).toHaveBeenCalledWith(accountId)
-      expect(mockEngine.settle).toBeCalledTimes(20)
+      expect(mockEngine.settle).toBeCalledTimes(1)
 
-      // Test that Redis only queued the amount once
+      // (2) After original request, 3.21 should be queued for settlement and available to lease
       const [amountToSettle1, commitSettlement] = await prepareSettlement(accountId, 1000)
-      expect(amountToSettle1).toStrictEqual(requestAmount) // TODO
+      expect(amountToSettle1).toStrictEqual(requestAmount)
 
-      await store.handleSettlementRequest(accountId, idempotencyKey, requestAmount)
+      const amountQueued2 = await store.handleSettlementRequest(
+        accountId,
+        idempotencyKey,
+        requestAmount
+      )
+      expect(amountQueued2).toStrictEqual(requestAmount)
+
+      // (3) After amount is leased + 2nd idempotent request, no additional amount should be available to settle
       const [amountToSettle2] = await prepareSettlement(accountId, 1000)
       expect(amountToSettle2).toStrictEqual(new BigNumber(0))
 
       await commitSettlement.exec()
 
-      await store.handleSettlementRequest(accountId, idempotencyKey, requestAmount)
+      const amountQueued3 = await store.handleSettlementRequest(
+        accountId,
+        idempotencyKey,
+        requestAmount
+      )
+      expect(amountQueued3).toStrictEqual(requestAmount)
+
+      // (4) After settlement is committed + 3rd idempotent request, no additional amount should be available to settle
       const [amountToSettle3] = await prepareSettlement(accountId, 1000)
       expect(amountToSettle3).toStrictEqual(new BigNumber(0))
 
-      // const savedAmount = await store.handleSettlementRequest(accountId, idempotencyKey, amount)
-
-      // TODO What should I check?
+      // Settlement should still only be triggered once
+      expect(mockEngine.settle).toBeCalledTimes(1)
     })
   })
 

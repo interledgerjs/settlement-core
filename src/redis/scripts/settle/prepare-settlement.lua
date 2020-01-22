@@ -7,7 +7,7 @@ local unpack = unpack or table.unpack
 
 local account_id, lease_duration_ms = unpack(ARGV)
 
--- Determine next timestamp to attempt a retry
+-- TODO
 local unix_timestamp, microsec = unpack(redis.call('TIME'))
 local timestamp_ms = (unix_timestamp * 1000) + math.floor(microsec / 1000)
 local lease_expiration_timestamp = timestamp_ms + lease_duration_ms
@@ -22,8 +22,8 @@ for _, amount_id in ipairs(amounts_to_settle) do
   redis.call('ZADD', pending_settlements_key, lease_expiration_timestamp, amount_id)
   local amount = redis.call('GET', 'accounts:' .. account_id .. ':pending-settlements:' .. amount_id)
 
-  table.insert(settlements, amount_id)
-  table.insert(settlements, amount)
+  table.insert(settlement_amounts, amount_id)
+  table.insert(settlement_amounts, amount)
 end
 
 return settlement_amounts
