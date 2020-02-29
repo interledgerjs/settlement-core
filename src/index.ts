@@ -1,7 +1,7 @@
-export { CreateStore } from './store'
+export { CreateStore, SettlementStore } from './store'
 export { startServer, SettlementServer, SettlementServerConfig } from './connector'
 export {
-  connectRedisStore,
+  createRedisStore,
   RedisSettlementEngine,
   ConnectRedisSettlementEngine,
   RedisStoreServices,

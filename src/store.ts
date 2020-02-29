@@ -12,12 +12,6 @@ export interface SettlementStore {
   createAccount(accountId: string): Promise<boolean>
 
   /**
-   * Has the given account been instantiated via a call from the connector?
-   * @param accountId Unique account identifier
-   */
-  isExistingAccount(accountId: string): Promise<boolean>
-
-  /**
    * Delete all state associated with the given account
    * @param accountId Unique account identifier
    */
@@ -47,7 +41,7 @@ export interface SettlementStore {
    * @param message Parsed JSON message from peer
    * @return Response message, to be serialized as JSON
    */
-  handleMessage?(accountId: string, message: any): Promise<any>
+  handleMessage(accountId: string, message: object): Promise<object | void>
 
   /** Shutdown the database connection */
   disconnect?(): Promise<void>

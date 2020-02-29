@@ -35,5 +35,3 @@ export const isQuantity = (o: any): o is Quantity =>
   NUMERIC_REGEX.test(o.amount) &&
   new BigNumber(o.amount).isInteger() &&
   +o.amount >= 0
-
-// TODO Should I include the ValidAmount nominal type here, or somewhere else?

@@ -1,33 +1,22 @@
 import BigNumber from 'bignumber.js'
 import { ConnectorServices } from '../connector/services'
-import { SettlementStore } from '../store'
+import { SettlementStore, CreateStore } from '../store'
 import { RedisStoreServices, setupSettlementServices } from './services'
 import { createRedisClient, DecoratedPipeline, DecoratedRedis, RedisConfig } from './database'
-import { Brand, sleep } from '../utils'
+import { Brand, sleep, throttle } from '../utils'
 import debug from 'debug'
 
 export { RedisStoreServices, DecoratedPipeline, DecoratedRedis, RedisConfig }
 
 const log = debug('settlement-core')
 
-/** TODO */
-const REDIS_CREDIT_POLL_INTERVAL_MS = 50
-
-/** TODO */
-const KEY_NAMESPACE_DELIMITER = ':'
-
-// TODO Should I setup typedoc?
-
-// TODO Make sure I add docs here
-
 export type ConnectRedisSettlementEngine = (
   services: RedisStoreServices
 ) => Promise<RedisSettlementEngine>
 
 /**
- * TODO
  * Essential functionality to send and receive payments with peers
- * that every settlement engine must provide
+ * using Redis as a database backend for accounting and persistence
  */
 export interface RedisSettlementEngine {
   /**
@@ -36,7 +25,7 @@ export interface RedisSettlementEngine {
    * @param accountId Unique account identifier
    * @return Optional Redis transaction to atomically execute while creating the account
    */
-  setupAccount?(accountId: SafeRedisKey): Promise<DecoratedPipeline | void>
+  setupAccount?(accountId: SafeRedisKey): Promise<void>
 
   /**
    * Delete or close the given account
@@ -45,6 +34,7 @@ export interface RedisSettlementEngine {
    * @return Optional Redis transaction to atomically execute while deleting the account
    */
   closeAccount?(accountId: SafeRedisKey): Promise<DecoratedPipeline | void>
+  // TODO Is this the only thing specific to Redis? Could this be "SettlementEngine" instead of Redis-specific?
 
   /**
    * Handle and respond to an incoming message from the given peer
@@ -52,7 +42,7 @@ export interface RedisSettlementEngine {
    * @param message Parsed JSON message from peer
    * @return Response message, to be serialized as JSON
    */
-  handleMessage?(accountId: SafeRedisKey, message: any): Promise<any>
+  handleMessage(accountId: SafeRedisKey, message: any): Promise<any>
 
   /**
    * Send a settlement to the peer for up to the given amount
@@ -65,72 +55,77 @@ export interface RedisSettlementEngine {
   disconnect?(): Promise<void>
 }
 
-export const connectRedisStore = async (
+export const createRedisStore = (
   createEngine: ConnectRedisSettlementEngine,
-  connectorServices: ConnectorServices,
-  redisConfig: RedisConfig
-): Promise<SettlementStore> => {
+  redisConfig?: RedisConfig
+): CreateStore => async (connectorServices: ConnectorServices): Promise<SettlementStore> => {
   const redis = await createRedisClient(redisConfig)
 
   const { sendMessage, sendCreditRequest } = connectorServices
-
-  // Callback to send a request to connector to credit a settlement and if successful, finalize in Redis
-  const notifyAndFinalizeCredit = tryToFinalizeCredit(redis)(sendCreditRequest)
 
   // Setup account services: callbacks to send messages, credit settlements, etc. to pass to the settlement engine
   const accountServices: RedisStoreServices = {
     redis,
     sendMessage,
-    ...setupSettlementServices(redis, notifyAndFinalizeCredit)
+    ...setupSettlementServices(redis)
   }
 
   // Create background task to poll Redis for when to retry notifying the connector of incoming settlements
-  const stopCreditLoop = startCreditLoop(redis, notifyAndFinalizeCredit)
+  const stopCreditLoop = startCreditLoop(redis, sendCreditRequest)
 
   // Connect the settlement engine
   const engine = await createEngine(accountServices)
 
-  // TODO Try to settle with all accounts for queued settlements
+  // TODO Try to settle with all accounts: Redis SCAN through accounts, then call `settle` on the engine for each of them
 
   return {
-    ...(engine.handleMessage && engine.handleMessage.bind(engine)), // TODO Too verbose?
+    // TODO Should all engines have to handle incoming messages?
+    handleMessage(accountId, message) {
+      if (!isSafeRedisKey(accountId)) {
+        return Promise.reject(new Error('Account ID contains unsafe characters'))
+      }
 
-    async createAccount(accountId) {
-      // TODO Check for safe key
-      return (await redis.sadd('accounts', accountId)) === 0 // SADD returns number of elements added to set
+      if (engine.handleMessage) {
+        return engine.handleMessage(accountId, message)
+      } else {
+        return Promise.reject(new Error('Settlement engine cannot handle incoming messages'))
+      }
     },
 
-    async isExistingAccount(accountId) {
-      // TODO CHeck for safe key
-      return (await redis.sismember('accounts', accountId)) === 1
+    async createAccount(accountId) {
+      if (!isSafeRedisKey(accountId)) {
+        return Promise.reject(new Error('Account ID contains unsafe characters'))
+      }
+
+      if (engine.setupAccount) {
+        await engine.setupAccount(accountId)
+      }
+
+      const didCreateAccount = (await redis.createAccount(accountId)) === 1
+      return didCreateAccount
     },
 
     async deleteAccount(accountId) {
-      // TODO Check for safe key?
       if (!isSafeRedisKey(accountId)) {
-        return
+        return Promise.reject(new Error('Account ID contains unsafe characters'))
       }
 
-      await redis.deleteAccount(accountId)
+      const tx = (engine.closeAccount && (await engine.closeAccount(accountId))) || redis.multi()
+      await tx.deleteAccount(accountId).exec()
     },
 
     async handleSettlementRequest(accountId, idempotencyKey, amount) {
       if (!isSafeRedisKey(accountId)) {
-        return Promise.reject(new Error('Account ID contains unsafe characters')) // TODO This should be a bad request error, no?
+        return Promise.reject(new Error('Account ID contains unsafe characters'))
       }
 
       if (!isSafeRedisKey(idempotencyKey)) {
         return Promise.reject(new Error('Idempotency key contains unsafe characters'))
       }
 
-      if (!isValidAmount) {
-        // TODO Implement this!
+      if (!isValidAmount(amount) || !amount.isGreaterThan(0)) {
+        return Promise.reject(new Error('Invalid amount'))
       }
-
-      // TODO Perform validation on accountId? Amount? Or should error handling be in server code?
-
-      // Since all engines have to truncate & check if the amount is zero anyways,
-      // allow settlement requests for 0 -- provides mechanism to easily retry settlement
 
       const response = await redis.queueSettlement(accountId, idempotencyKey, amount.toFixed())
 
@@ -156,47 +151,30 @@ export const connectRedisStore = async (
   }
 }
 
-/** TODO doc */
+// TODO Move these helpers to separate files? `validate` and `credit-daemon`?
+
+const REDIS_NAMESPACE_DELIMITER = ':'
+
+/** String safe to use within a Redis key */
 export type SafeRedisKey = Brand<string, 'SafeRedisKey'>
 
-/** TODO doc */
+/** Is the this a safe, non-empty Redis key that doesn't break into another namespace? */
 export const isSafeRedisKey = (o: any): o is SafeRedisKey =>
-  typeof o === 'string' && o.length > 0 && !o.includes(KEY_NAMESPACE_DELIMITER)
+  typeof o === 'string' && o.length > 0 && !o.includes(REDIS_NAMESPACE_DELIMITER)
 
-/** TODO doc */
+/** Amount safe to use in an accounting balance: not `NaN`, Infinity, or negative */
 export type ValidAmount = Brand<BigNumber, 'ValidAmount'>
 
 /** Is the given amount a BigNumber, finite, and non-negative (positive or 0)? */
 export const isValidAmount = (o: any): o is ValidAmount =>
   BigNumber.isBigNumber(o) && o.isGreaterThanOrEqualTo(0) && o.isFinite()
 
-/** Credit an incoming settlement to the account's balance */
+/** Callback to credit an incoming settlement to the given account's balance */
 export type CreditSettlement = (
   accountId: SafeRedisKey,
   idempotencyKey: SafeRedisKey,
   amount: ValidAmount
 ) => Promise<void>
-
-// prettier-ignore
-
-/**
- * Create callback to send a request to the connector to credit an incoming settlement
- * and finalize the credited settlement in Redis if successful.
- */
-export const tryToFinalizeCredit =
-    (redis: DecoratedRedis) =>
-    (sendCreditRequest: CreditSettlement): CreditSettlement =>
-    (accountId, idempotencyKey, amount) =>
-      sendCreditRequest(accountId, idempotencyKey, amount)
-        .then(async () => {
-          await redis.finalizeSettlementCredit(accountId, idempotencyKey)
-          log(`Connector credited settlement: account=${accountId} amount=${amount}, idempotencyKey=${idempotencyKey}`)
-        })
-        .catch(err =>
-          log(`Connector failed to credit settlement, will retry: account=${accountId} amount=${amount}, idempotencyKey=${idempotencyKey}`, err)
-        )
-
-type StopCreditLoop = () => Promise<void>
 
 /**
  * Start polling Redis for queued settlement credits to notify the connector
@@ -204,11 +182,11 @@ type StopCreditLoop = () => Promise<void>
  * @param notifyConnector Callback to send HTTP request to connector to notify accounting system of incoming settlement
  * @return Callback to stop polling, returning a Promise that resolves when the loop ends
  */
-export const startCreditLoop = (
-  redis: DecoratedRedis,
-  sendCreditRequest: CreditSettlement
-): StopCreditLoop => {
+export const startCreditLoop = (redis: DecoratedRedis, sendCreditRequest: CreditSettlement) => {
   let terminate = false
+
+  // If something goes very wrong, don't log too excessively
+  const throttledLog = throttle(log, 30000)
 
   const creditLoop = (async () => {
     while (true) {
@@ -216,25 +194,33 @@ export const startCreditLoop = (
         return
       }
 
-      // TODO Log error, but throttle so the logs don't fill up
-      const credit = await redis.retrySettlementCredit().catch(() => null)
+      const credit = await redis
+        .retrySettlementCredit()
+        .catch(err => throttledLog('Failed to check for queued incoming settlements', err))
       if (!credit) {
-        await sleep(REDIS_CREDIT_POLL_INTERVAL_MS)
+        await sleep(50)
         continue
       }
 
       const [accountId, idempotencyKey] = credit
       const amount = new BigNumber(credit[2])
 
-      // TODO Validate accountId is SafeKey -- or update schema to say it MUST return a SafeKey?
       if (!isSafeRedisKey(accountId) || !isSafeRedisKey(idempotencyKey) || !isValidAmount(amount)) {
-        await sleep(REDIS_CREDIT_POLL_INTERVAL_MS)
+        throttledLog(
+          'Failed to notify connector of incoming settlements, database may be corrupted'
+        )
+
+        await sleep(50)
         continue
       }
 
-      sendCreditRequest(accountId, idempotencyKey, amount).catch(err => {
-        // TODO Catch error here? Shouldn't error, since it's just tryToFinalizeCredit
-      })
+      const details = `account=${accountId} amount=${amount} idempotencyKey=${idempotencyKey}`
+      sendCreditRequest(accountId, idempotencyKey, amount)
+        .then(async () => {
+          await redis.finalizeSettlementCredit(accountId, idempotencyKey)
+          log(`Connector credited incoming settlement: ${details}`)
+        })
+        .catch(err => log(`Connector failed to credit settlement, will retry: ${details}`, err))
 
       // Keep sending notifications with no delay until the queue is empty
     }

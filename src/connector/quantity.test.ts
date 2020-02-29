@@ -168,35 +168,3 @@ describe('#isQuantity', () => {
     test(message, () => expect(isQuantity(input)).toBe(false))
   )
 })
-
-// TODO Move these to Redis
-
-// describe('#isValidAmount', () => {
-//   test('True for very large positive numbers', () => {
-//     expect(isValidAmount(new BigNumber('134839842444364732'))).toBe(true)
-//   })
-
-//   test('True for very small positive numbers', () => {
-//     expect(isValidAmount(new BigNumber('32.23843824832838489999999e-150'))).toBe(true)
-//   })
-
-//   test('True for positive 0', () => {
-//     expect(isValidAmount(new BigNumber(0))).toBe(true)
-//   })
-
-//   test('True for negative 0', () => {
-//     expect(isValidAmount(new BigNumber('-0'))).toBe(true)
-//   })
-
-//   test('False for Infinity', () => {
-//     expect(isValidAmount(new BigNumber(Infinity))).toBe(false)
-//   })
-
-//   test('False for NaN', () => {
-//     expect(isValidAmount(new BigNumber(NaN))).toBe(false)
-//   })
-
-//   test('False for negative numbers', () => {
-//     expect(isValidAmount(new BigNumber('-3248'))).toBe(false)
-//   })
-// })

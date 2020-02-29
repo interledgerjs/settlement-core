@@ -4,21 +4,23 @@ export const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 /** Nominal type to enforce usage of custom type guards */
 export type Brand<K, T> = K & { readonly __brand: T }
 
-// TODO
-// export const throttle = <T extends (...args: any[]) => any>(run: T, period: number): T => {
-//   let ready = true
+/**
+ * Create a function that runs the given function once per period, ignoring subsequent calls
+ * @param func Function to execute once per period
+ * @param period Number of milliseconds between function calls
+ */
+export function throttle<F extends Function>(func: F, period: number): F {
+  let ready = true
 
-//   return (...args: Parameters<T>): ReturnType<T> => {
-//     // if (!ready) {
-//     //   return
-//     // }
+  return ((...args: any[]) => {
+    if (!ready) {
+      return
+    }
 
-//     ready = false
+    setTimeout(() => {
+      ready = true
+    }, period)
 
-//     setTimeout(() => {
-//       ready = true
-//     }, period)
-
-//     return run(...args)
-//   }
-// }
+    func(...args)
+  }) as any
+}

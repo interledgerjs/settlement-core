@@ -1,14 +1,9 @@
 import BigNumber from 'bignumber.js'
-import Redis, { MultiOptions, Pipeline, Redis as IoRedis, RedisOptions } from 'ioredis'
-import { SafeRedisKey, isValidAmount } from '.'
+import Redis, { Redis as IoRedis, Pipeline, RedisOptions } from 'ioredis'
+import { isValidAmount } from '.'
 import { Brand } from '../utils'
-import DeleteAccountScript from './scripts/account/delete-account.lua'
-import AddCreditScript from './scripts/credit/add-credit.lua'
-import FinalizeCreditScript from './scripts/credit/finalize-credit.lua'
-import RetryCreditScript from './scripts/credit/retry-credit.lua'
-import CommitSettlementScript from './scripts/settle/commit-settlement.lua'
-import PrepareSettlementScript from './scripts/settle/prepare-settlement.lua'
-import QueueSettlementScript from './scripts/settle/queue-settlement.lua'
+import { promises as fs } from 'fs'
+import { resolve } from 'path'
 
 /**
  * Redis Key Namespace
@@ -29,7 +24,10 @@ import QueueSettlementScript from './scripts/settle/queue-settlement.lua'
  *   so the funds cannot be double spent until the lease expires or the settlement is committed.
  *
  * accounts:[account-id]:pending-settlements:[amount-id]
- * - Arbitrary precision string of the settlement amount corresponding to the amount ID
+ * - Hash of each pending outgoing settlement
+ *   `amount`           -- Arbitrary precision string of the settlement amount
+ *   `lease_expiration` -- UNIX timestamp in milliseconds when the lease expires/this settlement can be retried
+ *   `lease_nonce`      -- Nonce corresponding a unqiue settlement attempt to identify when this lock is released
  *
  * accounts:[account-id]:settlement-credits:[idempotency-key]
  * - Hash of each request to connector to credit an incoming settlement
@@ -43,32 +41,20 @@ import QueueSettlementScript from './scripts/settle/queue-settlement.lua'
  * - Sorted set of keys for corresponding credit hashes, sorted by UNIX timestamp of the next retry in milliseconds
  */
 
-// TODO Add docs to all of this!
+// TODO
+// export interface DecoratedPipeline extends Pipeline {
+//   bar(): Pipeline
+// }
 
-// TODO Add stronger type checking to all of this
-
-export interface DecoratedPipeline extends Pipeline {
-  commitSettlement(accountId: SafeRedisKey, ...amountIds: string[]): DecoratedPipeline
-  addSettlementCredit(
-    accountId: SafeRedisKey,
-    idempotencyKey: SafeRedisKey,
-    amount: string
-  ): DecoratedPipeline
+declare module 'ioredis' {
+  interface Pipeline {
+    foo(): boolean
+  }
 }
 
-export interface DecoratedRedis extends IoRedis {
-  multi(commands?: string[][], options?: MultiOptions): DecoratedPipeline
-  multi(options: { pipeline: false }): Promise<string>
-  queueSettlement(
-    accountId: SafeRedisKey,
-    idempotencyKey: SafeRedisKey,
-    amount: string
-  ): Promise<[string, 1 | null]>
-  prepareSettlement(accountId: SafeRedisKey, leaseDuration: number): Promise<string[]>
-  retrySettlementCredit(): Promise<[string, string, string] | null>
-  finalizeSettlementCredit(accountId: SafeRedisKey, idempotencyKey: SafeRedisKey): Promise<void>
-  deleteAccount(accountId: SafeRedisKey): Promise<void>
-}
+// TODO Remove all of this
+export { Pipeline as DecoratedPipeline }
+export { IoRedis as DecoratedRedis }
 
 /** Configuration options for the connection to the Redis database */
 export interface RedisConfig extends RedisOptions {
@@ -76,7 +62,7 @@ export interface RedisConfig extends RedisOptions {
   uri?: string
 }
 
-export const createRedisClient = async (config: RedisConfig = {}): Promise<DecoratedRedis> => {
+export const createRedisClient = async (config: RedisConfig = {}): Promise<IoRedis> => {
   const { client, uri, ...opts } = config
 
   /**
@@ -86,48 +72,71 @@ export const createRedisClient = async (config: RedisConfig = {}): Promise<Decor
    */
   const redis = client || new Redis(uri, opts)
 
+  const [
+    createAccountScript,
+    deleteAccountScript,
+    addCreditScript,
+    retryCreditScript,
+    finalizeCreditScript,
+    queueSettlementScript,
+    prepareSettlementScript
+  ] = await Promise.all(
+    [
+      // Account
+      './scripts/account-create.lua', // TODO Remove/use JS?
+      './scripts/account-delete.lua', // TODO Remove/use JS?
+      // Credit
+      './scripts/credit-add.lua',
+      './scripts/credit-retry.lua',
+      './scripts/credit-finalize.lua', // TODO Remove/use JS?
+      // Settle
+      './scripts/settlement-queue.lua',
+      './scripts/settlement-prepare.lua'
+    ].map(path => fs.readFile(resolve(__dirname, path)))
+  ).then(buf => buf.toString())
+
   // Register scripts for account management
+
+  redis.defineCommand('createAccount', {
+    numberOfKeys: 0,
+    lua: createAccountScript
+  })
 
   redis.defineCommand('deleteAccount', {
     numberOfKeys: 0,
-    lua: DeleteAccountScript
+    lua: deleteAccountScript
   })
 
   // Register scripts for performing outgoing settlements
 
   redis.defineCommand('queueSettlement', {
     numberOfKeys: 0,
-    lua: QueueSettlementScript
+    lua: queueSettlementScript
   })
 
   redis.defineCommand('prepareSettlement', {
     numberOfKeys: 0,
-    lua: PrepareSettlementScript
-  })
-
-  redis.defineCommand('commitSettlement', {
-    numberOfKeys: 0,
-    lua: CommitSettlementScript
+    lua: prepareSettlementScript
   })
 
   // Register scripts for crediting incoming settlements
 
   redis.defineCommand('addSettlementCredit', {
     numberOfKeys: 0,
-    lua: AddCreditScript
+    lua: addCreditScript
   })
 
   redis.defineCommand('retrySettlementCredit', {
     numberOfKeys: 0,
-    lua: RetryCreditScript
+    lua: retryCreditScript
   })
 
   redis.defineCommand('finalizeSettlementCredit', {
     numberOfKeys: 0,
-    lua: FinalizeCreditScript
+    lua: finalizeCreditScript
   })
 
-  return redis as DecoratedRedis
+  return redis
 }
 
 /**

@@ -17,7 +17,7 @@ export const createController = (store: SettlementStore): Express => {
     const accountId = req.body.id || uuid() // Create account ID if none was provided
 
     try {
-      await store.createAccount(accountId) // TODO If the account already exists, should this fail? (comment this in Redis store)
+      await store.createAccount(accountId)
     } catch (err) {
       log(`Failed to setup account: account=${accountId}`, err)
       return res.sendStatus(500)
@@ -87,14 +87,18 @@ export const createController = (store: SettlementStore): Express => {
   // Respond to incoming messages
   app.post('/accounts/:id/messages', bodyParser.raw(), async (req, res) => {
     const accountId = req.params.id
-
-    if (!store.handleMessage) {
-      log(`Received incoming message that settlement engine cannot handle: account=${accountId}`)
-      return res.status(400).send('Settlement engine does not support incoming messages')
-    }
+    res.type('buffer')
 
     try {
-      const response = await store.handleMessage(accountId, JSON.parse(req.body))
+      const parsedData = JSON.parse(req.body)
+      if (!parsedData || typeof parsedData !== 'object') {
+        return res.status(400).send('Engine only supports JSON messages')
+      }
+
+      const response = await store.handleMessage(accountId, parsedData)
+      if (!response) {
+        return res.sendStatus(201)
+      }
 
       const rawResponse = Buffer.from(JSON.stringify(response))
       res.status(201).send(rawResponse)

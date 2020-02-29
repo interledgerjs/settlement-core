@@ -1,8 +1,16 @@
 import BigNumber from 'bignumber.js'
 import debug from 'debug'
 import uuid from 'uuid/v4'
-import { CreditSettlement, isSafeRedisKey, isValidAmount, SafeRedisKey, ValidAmount } from './'
-import { DecoratedPipeline, DecoratedRedis, isSettlementAmounts } from './database'
+import {
+  CreditSettlement,
+  isSafeRedisKey,
+  isValidAmount,
+  SafeRedisKey,
+  ValidAmount,
+  DecoratedPipeline
+} from './'
+import { isSettlementAmounts } from './database'
+import { Redis, Pipeline } from 'ioredis'
 
 const log = debug('settlement-core')
 
@@ -14,58 +22,54 @@ interface RedisSettlementServices {
    * @param leaseDuration Number of milliseconds the funds should be on hold before they get rolled back (recommended to overestimate)
    * @return Tuple of maximum amount to settle and Redis transaction to commit the settlement.
    *         - Engine MUST truncate this amount to its precision and make sure it's not zero first.
-   *         - Commitment transaction fails if the lease already expired, then removes the settlement as pending.
    *         - Engine MUST execute this transaction before unconditionally performing the settlement, and should
    *           include their own logic to safely rollback in case of failure.
+   *         - If the lease already expired, the commitment transaction will fail; if it succeeds, it will
+   *           remove the lease as pending.
    */
-  prepareSettlement(
-    accountId: string,
-    leaseDuration: number
-  ): Promise<[ValidAmount, DecoratedPipeline]>
+  prepareSettlement(accountId: string, leaseDuration: number): Promise<[ValidAmount, Pipeline]>
+
+  // TODO The signatures/documentation for these should be updated
 
   /**
    * Rollback a failed or partial outgoing settlement to retry again later
    * @param accountId Account that's the recipient of the settlements
    * @param amount Amount to refund and re-queue for settlement. If zero, tx will still be executed.
-   * @param tx Redis transaction to execute atomically before rolling back the balance. Recommended to:
-   *           1. Fail if this settlement was already rolled back
+   * @param tx Redis transaction to execute atomically before rolling back the balance. Engine is recommended to:
+   *           1. Early return if this settlement was already rolled back
    *           2. Mark the settlement as complete to prevent rolling back this settlement more than once
    */
-  refundSettlement(accountId: string, amount: BigNumber, tx?: DecoratedPipeline): Promise<void>
+  refundSettlement(accountId: string, amount: BigNumber, tx?: Pipeline): Pipeline
 
   /**
    * Credit an incoming settlement to the account balance of the sender
    * @param accountId Account of sender of the settlement
    * @param amount Amount received as an incoming settlement. If zero, tx will still be executed.
-   * @param tx Redis transaction to execute atomically before crediting the balance. Recommended to:
-   *           1. Fail if this settlement was already credited
+   * @param tx Redis transaction to execute atomically before crediting the balance. Engine is recommended to:
+   *           1. Fail if this settlement was already credited using Redis DISCARD
    *           2. Prevent crediting this settlement more than once
    */
-  creditSettlement(accountId: string, amount: BigNumber, tx?: DecoratedPipeline): Promise<void>
+  creditSettlement(accountId: string, amount: BigNumber, tx?: Pipeline): Pipeline
 }
 
 /** Callbacks for the settlement engine to account for settlements, integrate with Redis, and send messages */
 export interface RedisStoreServices extends RedisSettlementServices {
   /** Connected ioredis client, decorated with custom Lua scripts for accounting */
-  redis: DecoratedRedis
+  redis: Redis
 
   /**
    * Send a message to the given account and return their response
    * @param accountId Unique account identifier to send message to
    * @param message Object to be serialized as JSON
    */
-  sendMessage(accountId: SafeRedisKey, message: any): Promise<any>
+  sendMessage(accountId: string, message: any): Promise<any>
 }
 
 /**
  * Create callbacks to pass to the settlement to atomically prepare, commit, credit and refund settlements
  * @param redis Connected ioredis instance decorated with Lua scripts for accounting
- * @param sendCreditNotification Callback to send request to connector to credit an incoming settlement and finalize in Redis
  */
-export const setupSettlementServices = (
-  redis: DecoratedRedis,
-  notifyAndFinalizeCredit: CreditSettlement
-): RedisSettlementServices => ({
+export const setupSettlementServices = (redis: Redis): RedisSettlementServices => ({
   async prepareSettlement(accountId, leaseDuration) {
     if (!isSafeRedisKey(accountId)) {
       return Promise.reject(new Error('Failed to prepare settlement, invalid account'))
@@ -91,81 +95,107 @@ export const setupSettlementServices = (
     }
 
     if (amount.isZero()) {
-      log(`No settlement amounts are available to lease: account=${accountId}`)
-      return [new BigNumber(0) as ValidAmount, redis.multi()]
+      return Promise.reject(
+        new Error(`No settlement amounts are available to lease: account=${accountId}`)
+      )
     }
 
     // Create transaction to atomically commit this settlement
     const amountIds = response.filter((_, i) => i % 2 === 0) // Even elements in response
-    const commitTx = redis.multi().commitSettlement(accountId, ...amountIds)
+
+    // If we use a single Redis instance, our Redis WATCH blocks may not work correctly, since the
+    // settlement engine could be executing other concurrent Redis transactions:
+    // https://github.com/luin/ioredis/issues/999
+    // https://github.com/luin/ioredis/issues/266#issuecomment-332441562
+
+    // So, create a new Redis connection for this settlement to workaround
+    // Automatically disconnect it after the settlement lease expires!
+    const redisCopy = redis.duplicate()
+    setTimeout(() => redisCopy.disconnect(), leaseDuration * 2)
+
+    // Fail this settlement if a leases expires and any of these settlement amount are retried
+    await amountIds
+      .reduce(
+        (pipeline, amountId) =>
+          pipeline.watch(`accounts:${accountId}:pending-settlements:${amountId}`),
+        redisCopy.pipeline()
+      )
+      .exec()
+
+    // TODO How/when should I call UNWATCH? Is that not important if I disconnect the instance after the lease expires?
 
     const details = `account=${accountId} amount=${amount} ids=${amountIds}`
     log(`Preparing settlement, funds on hold: ${details}`)
 
-    return [amount, commitTx]
+    // Compose an atomic transaction to delete each pending settlement amount when
+    // the settlement engine commits the settlement
+    const pendingSettlementsKey = `accounts:${accountId}:pending-settlements`
+    const commitTransaction = amountIds.reduce(
+      (transaction, amountId) =>
+        transaction
+          .del(`accounts:${accountId}:pending-settlements:${amountId}`)
+          .zrem(pendingSettlementsKey, amountId),
+      redisCopy.multi()
+    )
+
+    return [amount, commitTransaction]
   },
 
-  async creditSettlement(accountId, amount, tx = redis.multi()) {
+  // TODO Should I change this signature to *return* a Redis multi instance, or decorate one?
+  creditSettlement(accountId, amount, tx = redis.multi()) {
     const idempotencyKey = uuid() as SafeRedisKey
     const details = `amountToCredit=${amount} account=${accountId} idempotencyKey=${idempotencyKey}`
 
     if (!isSafeRedisKey(accountId)) {
-      return Promise.reject(new Error('Failed to credit settlement, invalid account'))
+      log('Failed to credit settlement, invalid account')
+      return tx
     }
 
     // Protects against saving `NaN` or `Infinity` to the database
     if (!isValidAmount(amount)) {
-      return Promise.reject(new Error('Failed to credit settlement, invalid amount'))
+      log('Failed to credit settlement, invalid amount')
+      return tx
     }
 
     // If amount is 0, still execute the transaction (no effect of credit)
     if (amount.isZero()) {
       log(`Ignoring credit for 0 amount, still executing provided Redis transaction: ${details}`)
-      await tx.exec()
-      return
+      return tx
     }
 
     // TODO Also atomically check that the account still exists (and add tests)
-    await tx.addSettlementCredit(accountId, idempotencyKey, amount.toFixed()).exec()
-
-    log(`Saved incoming settlement, attempting to notify connector: ${details}`)
-
-    // Send initial request to connector to credit the settlement
-    notifyAndFinalizeCredit(accountId, idempotencyKey, amount).catch(err =>
-      log(`Error notifying connector of incoming settlement: ${details}`, err)
-    )
+    // log(`Saved incoming settlement, queued task to notify connector: ${details}`) // TODO Cannot log here if it fails, right?
+    return tx.addSettlementCredit(accountId, idempotencyKey, amount.toFixed())
   },
 
-  async refundSettlement(accountId, amount, tx = redis.multi()) {
+  refundSettlement(accountId, amount, tx = redis.multi()): DecoratedPipeline {
     const amountId = uuid()
     let details = `amountToRefund=${amount} account=${accountId} amountId=${amountId}`
 
     if (!isSafeRedisKey(accountId)) {
-      return Promise.reject(new Error('Failed to refund settlement, invalid account'))
+      log('Failed to refund settlement, invalid account')
+      return tx
     }
 
     // Protects against saving `NaN` or `Infinity` to the database
     if (!isValidAmount(amount)) {
-      return Promise.reject(new Error('Failed to refund settlement, invalid amount'))
+      log('Failed to refund settlement, invalid amount')
+      return tx
     }
 
     // If amount is 0, still execute the transaction (no effect to refund)
     if (amount.isZero()) {
-      log(`Ignoring refund for 0 amount, still executing provided Redis transaction: ${details}`)
-      await tx.exec()
-      return
+      log(`Ignoring refund for 0 amount: ${details}`)
+      return tx
     }
 
     const pendingSettlementsKey = `accounts:${accountId}:pending-settlements`
     const settlementKey = `accounts:${accountId}:pending-settlements:${amountId}`
 
-    // TODO Also atomically check that the account still exists (and add tests)
-    await tx
+    // TODO Also atomically check that the account still exists? Use a WATCH on the account?
+    return redis
+      .multi()
       .zadd(pendingSettlementsKey, '0', amountId)
-      .set(settlementKey, amount.toFixed())
-      .exec()
-
-    details = `amountRefunded=${amount} account=${accountId} amountId=${amountId}`
-    log(`Rolled back settlement to retry later: ${details}`)
+      .hset(settlementKey, 'amount', amount.toFixed())
   }
 })

@@ -3,16 +3,16 @@ import Redis, { Redis as IoRedis } from 'ioredis'
 import { GenericContainer, StartedTestContainer } from 'testcontainers'
 import uuid from 'uuid/v4'
 import {
-  connectRedisStore,
+  createRedisStore,
   RedisSettlementEngine,
   ConnectRedisSettlementEngine,
   RedisStoreServices,
-  SafeRedisKey
+  SafeRedisKey,
+  isValidAmount
 } from './'
 import { SettlementStore } from '../store'
 import { ConnectorServices } from '../connector/services'
 import debug from 'debug'
-import { sleep } from '../utils'
 
 const log = debug('settlement-core')
 
@@ -30,11 +30,12 @@ describe('Redis settlement store', () => {
 
     client = new Redis(redisContainer.getMappedPort(6379), redisContainer.getContainerIpAddress())
 
-    // TODO For debugging!
+    // TODO For debugging! (Remove?)
     log('Redis port', redisContainer.getMappedPort(6379))
 
     mockEngine = {
-      settle: jest.fn(async () => Promise.resolve())
+      settle: jest.fn(async () => Promise.resolve()),
+      handleMessage: jest.fn()
     }
 
     const connectMockEngine: ConnectRedisSettlementEngine = async services => {
@@ -47,17 +48,18 @@ describe('Redis settlement store', () => {
       sendMessage: jest.fn()
     }
 
-    store = await connectRedisStore(connectMockEngine, mockServices, { client })
+    const connectStore = createRedisStore(connectMockEngine, { client })
+    store = await connectStore(mockServices)
 
     // TODO Create an account for `alice` too? Or should this be within individual test?
   })
 
   afterEach(async () => {
-    await redisContainer.stop()
-
     if (store.disconnect) {
       await store.disconnect()
     }
+
+    await redisContainer.stop()
   })
 
   describe('Queues new settlements', () => {
@@ -81,7 +83,7 @@ describe('Redis settlement store', () => {
       expect(amountQueued2).toStrictEqual(requestAmount)
     })
 
-    test.only('Requests with same idempotency key queue a settlement exactly once', async () => {
+    test('Requests with same idempotency key queue a settlement exactly once', async () => {
       const accountId = 'alice' as SafeRedisKey
       const idempotencyKey = uuid()
       const requestAmount = new BigNumber(3.21)
@@ -98,7 +100,7 @@ describe('Redis settlement store', () => {
       expect(amountQueued1).toStrictEqual(requestAmount)
 
       // Settlement be triggered after the original request
-      // await sleep(10) // Allow event queue to call `settle`
+      // await sleep(10) // Allow event queue to call `settle` // TODO Is this necessary?
       expect(mockEngine.settle).toHaveBeenCalledWith(accountId)
       expect(mockEngine.settle).toBeCalledTimes(1)
 
@@ -135,12 +137,38 @@ describe('Redis settlement store', () => {
     })
   })
 
-  // TODO Add other `describe` and `todo` blocks
+  // TODO Add more tests!
 
-  // test('retry returns no settlements if there are no credits', async () => {
-  //   const credit = await store.retrySettlementCredit()
-  //   expect(credit).toBeUndefined()
-  // })
+  test.todo('retry returns no settlements if there are no credits')
+  test.todo('retry returns no settlements if none are ready to retry')
+})
 
-  // test.todo('test calling retry when no queued settlements are ready yet')
+describe('#isValidAmount', () => {
+  test('True for very large positive numbers', () => {
+    expect(isValidAmount(new BigNumber('134839842444364732'))).toBe(true)
+  })
+
+  test('True for very small positive numbers', () => {
+    expect(isValidAmount(new BigNumber('32.23843824832838489999999e-150'))).toBe(true)
+  })
+
+  test('True for positive 0', () => {
+    expect(isValidAmount(new BigNumber(0))).toBe(true)
+  })
+
+  test('True for negative 0', () => {
+    expect(isValidAmount(new BigNumber('-0'))).toBe(true)
+  })
+
+  test('False for Infinity', () => {
+    expect(isValidAmount(new BigNumber(Infinity))).toBe(false)
+  })
+
+  test('False for NaN', () => {
+    expect(isValidAmount(new BigNumber(NaN))).toBe(false)
+  })
+
+  test('False for negative numbers', () => {
+    expect(isValidAmount(new BigNumber('-3248'))).toBe(false)
+  })
 })

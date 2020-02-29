@@ -1,175 +1,296 @@
-// import axios from 'axios'
-// import { startServer, ConnectSettlementEngine } from '.'
-// import BigNumber from 'bignumber.js'
-// import uuid from 'uuid/v4'
-// import getPort from 'get-port'
+import axios from 'axios'
+import { startServer, createRedisStore } from '.'
+import BigNumber from 'bignumber.js'
+import getPort from 'get-port'
+import { GenericContainer, StartedTestContainer } from 'testcontainers'
+import { randomBytes } from 'crypto'
+import { ConnectRedisSettlementEngine } from './redis'
+import { sleep } from './utils' // TODO remove?
+import { LogWaitStrategy } from 'testcontainers/dist/wait-strategy'
 
-// TODO Update all of these tests!
+// const log = debug('settlement-test')
 
-// /**
-//  * Startup a settlement engine server with mock settlement, a memory store,
-//  * and return a function to send settlement requests to it
-//  */
-// const prepareSettlementEngine = async () => {
-//   const port = await getPort()
-//   const accountId = uuid()
+describe('Integration with Rust connector', () => {
+  let redisContainer: StartedTestContainer
+  let adminAuthToken: string
+  let rustNodeContainer: StartedTestContainer
+  let shutdownEngine: () => Promise<void>
 
-//   const settleMock = jest.fn()
-//   settleMock.mockImplementation(async (accountId: string, amount: BigNumber) => amount)
+  jest.setTimeout(600000) // TODO Reduce?
 
-//   const createEngine: ConnectSettlementEngine = async () => ({
-//     settle: settleMock
-//   })
+  beforeEach(async () => {
+    // TODO Also test Java & multiple accounts/SE instances!
+    // const javaContainer = await new GenericContainer('interledger4j/java-ilpv4-connector')
 
-//   const { shutdown } = await startServer(createEngine, createMemoryStore(), {
-//     port
-//   })
+    // TODO Abstract this into reusable integration test that also tests many simultaneous settlements?
 
-//   await axios.post(`http://localhost:${port}/accounts`, {
-//     id: accountId
-//   })
+    // TODO Run this in a Docker network rather than on the host? Can I still run the SE on the host?
 
-//   const sendSettlementRequest = (
-//     quantity: {
-//       amount: string
-//       scale: number
-//     },
-//     idempotencyKey = uuid()
-//   ) =>
-//     axios({
-//       url: `http://localhost:${port}/accounts/${accountId}/settlements`,
-//       method: 'POST',
-//       data: quantity,
-//       headers: {
-//         'Idempotency-Key': idempotencyKey
-//       }
-//     })
+    // Setup Redis (index 0 for connector, index 1 for engine)
+    // Don't use `host` network to prevent conflcits with host `redis-server` instance
+    redisContainer = await new GenericContainer('redis').withExposedPorts(6379).start()
+    const redisPort = redisContainer.getMappedPort(6379)
 
-//   return { sendSettlementRequest, settleMock, shutdown }
-// }
+    // TODO Add a specific hostname for each container?
+    // TODO Add a specific name for each container?
 
-// describe('Send settlement', () => {
-//   test('Triggers settlement for given amount', async () => {
-//     const { settleMock, sendSettlementRequest, shutdown } = await prepareSettlementEngine()
+    // Setup the Rust connector
+    adminAuthToken = 'admin'
+    rustNodeContainer = await new GenericContainer('interledgerrs/ilp-node')
+      .withNetworkMode('host')
+      // TODO Use environment variables instead?
+      .withCmd([
+        '--secret_seed',
+        randomBytes(32).toString('hex'),
+        '--admin_auth_token',
+        adminAuthToken,
+        '--database_url',
+        `redis://localhost:${redisPort}`,
+        '--ilp_address',
+        'g.corp',
+        '--settlement_api_bind_address',
+        '127.0.0.1:7771'
+      ])
+      .withWaitStrategy(new LogWaitStrategy('Settlement API listening'))
+      .start()
 
-//     const quantity = {
-//       amount: '468200000',
-//       scale: 8
-//     }
-//     const response = await sendSettlementRequest(quantity)
-//     expect(response.data).toStrictEqual(quantity) // The entire amount should be queued for settlement
-//     expect(response.status).toBe(201)
+    // Create a dummy settlement engine that "settles" by sending a message to
+    // its peer for the amount of the settlement :P
+    const createEngine: ConnectRedisSettlementEngine = async ({
+      sendMessage,
+      prepareSettlement,
+      creditSettlement
+    }) => ({
+      async settle(accountId) {
+        const [amount, commitTx] = await prepareSettlement(accountId, 1000)
 
-//     expect(settleMock.mock.calls.length).toBe(1)
-//     expect(settleMock.mock.calls[0][1]).toStrictEqual(new BigNumber('4.682'))
+        await sendMessage(accountId, { amount })
+        await commitTx.exec()
+      },
 
-//     await shutdown()
-//   })
+      async handleMessage(accountId, message) {
+        if (message.hasOwnProperty('amount')) {
+          await creditSettlement(accountId, new BigNumber(message.amount))
+        }
+      }
+    })
 
-//   test('Same idempotency key only queues one settlement', async () => {
-//     const { settleMock, sendSettlementRequest, shutdown } = await prepareSettlementEngine()
+    const connectStore = createRedisStore(createEngine, {
+      port: redisPort,
+      db: 1
+    })
 
-//     const quantity = {
-//       amount: '468200000',
-//       scale: 8
-//     }
-//     const idempotencyKey = uuid()
+    const enginePort = await getPort()
+    const engineUrl = `http://localhost:${enginePort}`
+    const engineServer = await startServer(connectStore, {
+      port: enginePort,
+      connectorUrl: `http://localhost:7771`
+    })
+    shutdownEngine = engineServer.shutdown
 
-//     await sendSettlementRequest(quantity, idempotencyKey)
+    // TODO Create abstract function to make outgoing request to connector!
 
-//     const response = await sendSettlementRequest(quantity, idempotencyKey)
-//     expect(response.data).toStrictEqual(quantity)
-//     expect(response.status).toBe(201)
+    await axios.post(
+      'http://localhost:7770/accounts',
+      {
+        username: 'alice',
+        asset_code: 'USD',
+        asset_scale: 2,
+        settle_to: -451,
+        settle_threshold: 0,
+        settlement_engine_url: engineUrl,
+        ilp_over_http_url: 'http://localhost:7770/accounts/bob/ilp',
+        ilp_over_http_outgoing_token: 'bob',
+        ilp_over_http_incoming_token: 'alice'
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${adminAuthToken}`
+        }
+      }
+    )
 
-//     expect(settleMock.mock.calls.length).toBe(1)
-//     expect(settleMock.mock.calls[0][1]).toStrictEqual(new BigNumber('4.682'))
+    await axios.post(
+      'http://localhost:7770/accounts',
+      {
+        username: 'bob',
+        asset_code: 'USD',
+        asset_scale: 2,
+        settlement_engine_url: engineUrl, // TODO Can this have a slash at the end or not?
+        ilp_over_http_url: 'http://localhost:7770/accounts/alice/ilp',
+        ilp_over_http_outgoing_token: 'alice',
+        ilp_over_http_incoming_token: 'bob'
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${adminAuthToken}`
+        }
+      }
+    )
+  })
 
-//     await shutdown()
-//   })
+  // TODO Why won't the logs work!?!?
+  afterEach(async () => {
+    await Promise.all([shutdownEngine(), rustNodeContainer.stop()])
+    await redisContainer.stop()
+  })
 
-//   test('Same idempotency key with different amount fails', async () => {
-//     const { settleMock, sendSettlementRequest, shutdown } = await prepareSettlementEngine()
+  test('Settlement between two connector accounts adjusts Interledger balances', async () => {
+    // Send a payment from Bob -> Alice in order to trigger settlement
+    // Rust connector doesn't auto prefund: https://github.com/interledger-rs/interledger-rs/issues/591
+    await axios.post(
+      'http://localhost:7770/accounts/bob/payments',
+      {
+        receiver: 'http://localhost:7770/accounts/alice/spsp',
+        source_amount: 10
+      },
+      {
+        headers: {
+          Authorization: `Bearer bob`
+        }
+      }
+    )
 
-//     const idempotencyKey = uuid()
+    await sleep(500)
 
-//     const quantity1 = {
-//       amount: '999',
-//       scale: 4
-//     }
-//     await sendSettlementRequest(quantity1, idempotencyKey)
+    const { data: aliceBalance } = await axios({
+      method: 'GET',
+      url: 'http://localhost:7770/accounts/alice/balance',
+      headers: {
+        Authorization: `Bearer alice`
+      }
+    })
+    expect(aliceBalance.balance).toEqual(-4.51)
 
-//     const quantity2 = {
-//       amount: '37843894895',
-//       scale: 4
-//     }
-//     await expect(sendSettlementRequest(quantity2, idempotencyKey)).rejects.toHaveProperty(
-//       'response.status',
-//       400
-//     )
+    const { data: bobBalance } = await axios({
+      method: 'GET',
+      url: 'http://localhost:7770/accounts/bob/balance',
+      headers: {
+        Authorization: `Bearer bob`
+      }
+    })
+    expect(bobBalance.balance).toEqual(4.51)
+  })
+})
 
-//     expect(settleMock.mock.calls.length).toBe(1)
-//     expect(settleMock.mock.calls[0][1]).toStrictEqual(new BigNumber('0.0999'))
+// TODO Should I add other integration test?
+//      (1) Crash the connector before an incoming settlement can be credited, then retry, to ensure it retries?
+//          (for this, I could even just use an SE that auto credits an account)
+//      (2) Verify deleting an account from the connector deletes it on the SE?
+//      (3) Try multiple simultaneous settlement requests, or for multiple accounts?
 
-//     await shutdown()
-//   })
+// TODO Delete/remove these tests?
 
-//   test('Retries unsettled amount after subsequent settlements are triggered', async () => {
-//     const { settleMock, sendSettlementRequest, shutdown } = await prepareSettlementEngine()
+// test('Triggers settlement for given amount', async () => {
+//   const { settleMock, sendSettlementRequest, shutdown } = await prepareSettlementEngine()
 
-//     // Request to settle 3.6, but only settle 1.207
-//     settleMock.mockResolvedValueOnce(new BigNumber(1.207))
-//     await sendSettlementRequest({
-//       amount: '3600',
-//       scale: 3
-//     })
+//   const quantity = {
+//     amount: '468200000',
+//     scale: 8
+//   }
+//   const response = await sendSettlementRequest(quantity)
+//   expect(response.data).toStrictEqual(quantity) // The entire amount should be queued for settlement
+//   expect(response.status).toBe(201)
 
-//     expect(settleMock.mock.calls.length).toBe(1)
-//     expect(settleMock.mock.calls[0][1]).toStrictEqual(new BigNumber('3.6'))
+//   expect(settleMock.mock.calls.length).toBe(1)
+//   expect(settleMock.mock.calls[0][1]).toStrictEqual(new BigNumber('4.682'))
 
-//     // Request to settle 4.9001
-//     await sendSettlementRequest({
-//       amount: '490010000',
-//       scale: 8
-//     })
-
-//     // Second settlement: 4.9001 new amount + 2.393 unsettled leftover = 7.2931
-//     expect(settleMock.mock.calls.length).toBe(2)
-//     expect(settleMock.mock.calls[1][1]).toStrictEqual(new BigNumber('7.2931'))
-
-//     await shutdown() // TODO How to shutdown even if test fails?
-//   })
-
-//   test('Safely handles many simultaneous settlement requests', async () => {
-//     const { settleMock, sendSettlementRequest, shutdown } = await prepareSettlementEngine()
-
-//     // Settle 1 unit x 100 times
-//     const requests = Array(100)
-//       .fill(null)
-//       .map(() =>
-//         sendSettlementRequest({
-//           amount: '1',
-//           scale: 0
-//         })
-//       )
-//     await Promise.all(requests)
-
-//     expect(settleMock.mock.calls.length).toBe(100)
-
-//     const totalSettled = settleMock.mock.calls
-//       .map(([accountId, amount]) => amount)
-//       .reduce((total, amount) => amount.plus(total), 0)
-//     expect(totalSettled).toStrictEqual(new BigNumber('100'))
-
-//     await shutdown()
-//   })
+//   await shutdown()
 // })
 
-// describe('Credit incoming settlements', () => {
-//   // test('Triggers notification of settlement for given amount', async () => {
-//   //   let engine: any
-//   //   engine.creditSettlement(5) // => got notification for 5 units
-//   //   // TODO
-//   // })
-//   // test.todo('Retries requests with exponential backofff')
-//   // test.todo('After')
+// test('Same idempotency key only queues one settlement', async () => {
+//   const { settleMock, sendSettlementRequest, shutdown } = await prepareSettlementEngine()
+
+//   const quantity = {
+//     amount: '468200000',
+//     scale: 8
+//   }
+//   const idempotencyKey = uuid()
+
+//   await sendSettlementRequest(quantity, idempotencyKey)
+
+//   const response = await sendSettlementRequest(quantity, idempotencyKey)
+//   expect(response.data).toStrictEqual(quantity)
+//   expect(response.status).toBe(201)
+
+//   expect(settleMock.mock.calls.length).toBe(1)
+//   expect(settleMock.mock.calls[0][1]).toStrictEqual(new BigNumber('4.682'))
+
+//   await shutdown()
+// })
+
+// test('Same idempotency key with different amount fails', async () => {
+//   const { settleMock, sendSettlementRequest, shutdown } = await prepareSettlementEngine()
+
+//   const idempotencyKey = uuid()
+
+//   const quantity1 = {
+//     amount: '999',
+//     scale: 4
+//   }
+//   await sendSettlementRequest(quantity1, idempotencyKey)
+
+//   const quantity2 = {
+//     amount: '37843894895',
+//     scale: 4
+//   }
+//   await expect(sendSettlementRequest(quantity2, idempotencyKey)).rejects.toHaveProperty(
+//     'response.status',
+//     400
+//   )
+
+//   expect(settleMock.mock.calls.length).toBe(1)
+//   expect(settleMock.mock.calls[0][1]).toStrictEqual(new BigNumber('0.0999'))
+
+//   await shutdown()
+// })
+
+// test('Retries unsettled amount after subsequent settlements are triggered', async () => {
+//   const { settleMock, sendSettlementRequest, shutdown } = await prepareSettlementEngine()
+
+//   // Request to settle 3.6, but only settle 1.207
+//   settleMock.mockResolvedValueOnce(new BigNumber(1.207))
+//   await sendSettlementRequest({
+//     amount: '3600',
+//     scale: 3
+//   })
+
+//   expect(settleMock.mock.calls.length).toBe(1)
+//   expect(settleMock.mock.calls[0][1]).toStrictEqual(new BigNumber('3.6'))
+
+//   // Request to settle 4.9001
+//   await sendSettlementRequest({
+//     amount: '490010000',
+//     scale: 8
+//   })
+
+//   // Second settlement: 4.9001 new amount + 2.393 unsettled leftover = 7.2931
+//   expect(settleMock.mock.calls.length).toBe(2)
+//   expect(settleMock.mock.calls[1][1]).toStrictEqual(new BigNumber('7.2931'))
+
+//   await shutdown()
+// })
+
+// test('Safely handles many simultaneous settlement requests', async () => {
+//   const { settleMock, sendSettlementRequest, shutdown } = await prepareSettlementEngine()
+
+//   // Settle 1 unit x 100 times
+//   const requests = Array(100)
+//     .fill(null)
+//     .map(() =>
+//       sendSettlementRequest({
+//         amount: '1',
+//         scale: 0
+//       })
+//     )
+//   await Promise.all(requests)
+
+//   expect(settleMock.mock.calls.length).toBe(100)
+
+//   const totalSettled = settleMock.mock.calls
+//     .map(([accountId, amount]) => amount)
+//     .reduce((total, amount) => amount.plus(total), 0)
+//   expect(totalSettled).toStrictEqual(new BigNumber('100'))
+
+//   await shutdown()
 // })
