@@ -210,42 +210,25 @@ export const startServer = async (
       details = `amountToCredit=${amountToCredit} account=${accountId} settlementId=${settlementId}`
       log(`Notifying connector to credit settlement: ${details}`)
 
-      const amountCredited = await retryRequest(notifySettlement)
+      const credited = await retryRequest(notifySettlement)
         .then(response => {
-          if (isQuantity(response.data)) {
-            return fromQuantity(response.data)
-          }
-
-          log(`Error: Connector failed to process settlement: ${details}`)
-          return new BigNumber(0)
+          return true
         })
         .catch(err => {
-          if (err.response && isQuantity(err.response.data)) {
-            return fromQuantity(err.response.data)
-          }
-
-          log(`Error: Failed to credit incoming settlement: ${details}`, err)
-          return new BigNumber(0)
+          return false
         })
 
-      const leftoverAmount = amountToCredit.minus(amountCredited)
-      details = `leftover=${leftoverAmount} credited=${amountCredited} amountToCredit=${amountToCredit} account=${accountId} settlementId=${settlementId}`
-
-      // Protects against saving `NaN` or `Infinity` to the database
-      if (!isValidAmount(leftoverAmount)) {
-        return log(`Error: Connector credited invalid amount: ${details}`)
+      if (credited) {
+        details = `amountToCredit=${amountToCredit} credited=${amountToCredit} leftover=0 account=${accountId} settlementId=${settlementId}`
+        return log(`Connector credited incoming settlement: ${details}`)
       }
 
-      log(`Connector credited incoming settlement: ${details}`)
-
-      // Don't save 0 amounts to the database
-      if (leftoverAmount.isZero()) {
-        return
-      }
+      details = `amountToCredit=${amountToCredit} credited=0 leftover=${amountToCredit} account=${accountId} settlementId=${settlementId}`
+      log(`Error: Connector failed to process the settlement: ${details}`)
 
       // Refund the leftover amount to retry later
       await store
-        .saveAmountToCredit(accountId, leftoverAmount)
+        .saveAmountToCredit(accountId, amountToCredit)
         .catch(err =>
           log(`Error: Failed to save uncredited settlement, balances incorrect: ${details}`, err)
         )
@@ -286,7 +269,7 @@ export const startServer = async (
       })
 
       const leftoverAmount = amountToSettle.minus(amountSettled)
-      details = `leftover=${leftoverAmount} settled=${amountSettled} amountToSettle=${amountToSettle} account=${accountId}`
+      details = `amountToSettle=${amountToSettle} settled=${amountSettled} leftover=${leftoverAmount} account=${accountId}`
 
       if (!isValidAmount(amountSettled)) {
         return log(`Error: Invalid settlement outcome: ${details}`)
